@@ -22,6 +22,55 @@
     requestAnimationFrame(finish)
     setTimeout(finish, 120)
   })
+  // The text a selector value asks for: a quoted string, /regex/flags (its literal characters), or bare text.
+  const selectorText = (value) => {
+    const raw = value.trim()
+    const quote = raw[0]
+    if (quote === '"' || quote === "'" || quote === "`") {
+      const end = raw.lastIndexOf(quote)
+      const inner = end > 0 ? raw.slice(1, end) : raw.slice(1)
+      return inner.replace(/\\(.)/g, "$1")
+    }
+    if (raw[0] === "/" && raw.lastIndexOf("/") > 0) {
+      return raw.slice(1, raw.lastIndexOf("/")).replace(/\\([sSdDwWbB])/g, " ").replace(/\\(.)/g, "$1").replace(/[\^$.*+?()[\]{}|]/g, " ")
+    }
+    return raw
+  }
+  // The role and name (or text) a selector part asks for, or null when it asks for neither.
+  const nearMissTarget = (engine, body) => {
+    if (engine === "internal:role" || engine === "role") {
+      const role = /^\s*([a-zA-Z-]+)/.exec(body)?.[1]
+      if (!role) return null
+      const name = /\[\s*name\s*=\s*((?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\/(?:[^/\\]|\\.)*\/)[a-z]*|[^\]]*)\s*\]/.exec(body)?.[1]
+      return { role: role.toLowerCase(), name: name == null ? null : selectorText(name.replace(/^(["'])(.*)\1[a-z]*$/s, "$1$2$1")) }
+    }
+    if (engine === "internal:text" || engine === "text" || engine === "internal:label" || engine === "label") {
+      return { role: null, name: selectorText(body.replace(/^(["'])(.*)\1[a-z]*$/s, "$1$2$1")) }
+    }
+    if (engine === "internal:attr") {
+      const match = /^\s*\[\s*(placeholder|alt|title|aria-label)\s*=\s*(.*?)\s*\]\s*$/s.exec(body)
+      return match ? { role: null, name: selectorText(match[2].replace(/^(["'])(.*)\1[a-z]*$/s, "$1$2$1")) } : null
+    }
+    return null
+  }
+  // The roles whose names selectors usually target; naming.roleFor falls back to the tag name for everything else.
+  const nearMissRoles = new Set(["button", "checkbox", "combobox", "dialog", "heading", "img", "link", "listbox", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "radio", "searchbox", "slider", "spinbutton", "summary", "switch", "tab", "textbox", "treeitem"])
+  const textKey = (text) => text.toLowerCase().replace(/\s+/g, " ").trim()
+  // Edit distance from want to the closest stretch of have, plus a little for the rest of have, so "Mensajes" is
+  // closest to "Mensaje" and still close to "Mensaje para Ana".
+  const nameDistance = (want, full) => {
+    const have = full.slice(0, 300)
+    if (!want) return have.length / 100
+    let previous = new Array(have.length + 1).fill(0)
+    for (let i = 1; i <= want.length; i++) {
+      const current = [i]
+      for (let j = 1; j <= have.length; j++) {
+        current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (want[i - 1] === have[j - 1] ? 0 : 1))
+      }
+      previous = current
+    }
+    return Math.min(...previous) + Math.abs(have.length - want.length) / 100
+  }
   const rectOf = (element) => {
     const r = element.getBoundingClientRect()
     return { x: r.left, y: r.top, width: r.width, height: r.height }
@@ -76,6 +125,59 @@
     },
     count(selector) {
       return this.queryAll(selector).length
+    },
+    // What the page has instead, for a selector that matched nothing: { role, items: [{ role, name, ref }] } with up
+    // to 5 elements of the selector's role (closest name first), or with the selector's name or text on other roles
+    // when the role has none. ref is the last snapshot's ref for the element, if it had one. null when the selector
+    // names no role or text to compare (CSS, xpath, test ids).
+    nearMisses(selector) {
+      const parts = this.inj.parseSelector(selector).parts
+      const last = parts[parts.length - 1]
+      if (!last || typeof last.body !== "string") return null
+      const target = nearMissTarget(last.name, last.body)
+      if (!target) return null
+      const naming = createNaming()
+      const refs = new Map()
+      for (const [id, ref] of this.refElements ?? []) {
+        const element = ref.deref()
+        if (element && element.isConnected) refs.set(element, id)
+      }
+      const describe = (element, role, distance) => ({ role, name: naming.identityNameFor(element, role) || "", ref: refs.get(element) ?? null, distance })
+      const want = target.name == null ? null : textKey(target.name)
+      const rank = (list) => list
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, 5)
+        .map(({ role, name, ref }) => ({ role, name, ref }))
+      if (target.role) {
+        let sameRole = []
+        try {
+          sameRole = this.queryAll(`internal:role=${target.role}`)
+        } catch {}
+        if (sameRole.length > 0) {
+          return {
+            role: target.role,
+            items: rank(sameRole.slice(0, 500).map((element) => {
+              const item = describe(element, target.role, 0)
+              item.distance = want == null ? 0 : nameDistance(want, textKey(item.name))
+              return item
+            })),
+          }
+        }
+      }
+      if (!want) return { role: target.role, items: [] }
+      // Elements of any role whose name is close to the one the selector asked for.
+      const close = []
+      const all = this.queryAll("*")
+      for (let index = 0; index < all.length && index < 5000; index++) {
+        const element = all[index]
+        const role = naming.roleFor(element)
+        if (!nearMissRoles.has(role) || hiddenFromAria(element)) continue
+        const name = naming.identityNameFor(element, role) || ""
+        if (!name) continue
+        const distance = nameDistance(want, textKey(name))
+        if (distance <= Math.max(1, Math.floor(want.length / 3))) close.push({ role, name, ref: refs.get(element) ?? null, distance })
+      }
+      return { role: target.role, items: rank(close) }
     },
 
     // Snapshot refs: the elements matching the ref's selector that still have its role and exact name and are not

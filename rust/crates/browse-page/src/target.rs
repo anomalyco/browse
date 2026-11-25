@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::page::{Element, ElementOr, TabPage, v};
@@ -154,7 +155,7 @@ fn selector_error(selector: &str, status: &str) -> Option<anyhow::Error> {
 pub async fn resolve(page: &Arc<TabPage>, tab_state: &PageTab, spec: &Spec, options: ResolveOptions) -> Result<Resolved> {
     let element = match spec {
         Spec::Ref(id) => resolve_ref(page, tab_state, id, options).await?,
-        Spec::Selector(selector) => resolve_selector(page, selector, options).await?,
+        Spec::Selector(selector) => resolve_selector(page, tab_state, selector, options).await?,
     };
     let label = page.call_element(&element, "describe", vec![], false).await.ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
     Ok(Resolved { element, label })
@@ -273,14 +274,14 @@ async fn resolve_aria_ref(page: &Arc<TabPage>, tab_state: &PageTab, id: &str, se
     }
 }
 
-async fn resolve_selector(page: &Arc<TabPage>, selector: &str, options: ResolveOptions) -> Result<Element> {
+async fn resolve_selector(page: &Arc<TabPage>, tab_state: &PageTab, selector: &str, options: ResolveOptions) -> Result<Element> {
     let parts = frame_parts(selector);
     let deadline = Instant::now() + options.timeout;
     let mut frame = page.main_frame();
     for (index, part) in parts.iter().enumerate() {
         let last = index == parts.len() - 1;
         let part = normalize_selector(if part.is_empty() { if last { "html" } else { "iframe" } } else { part });
-        let element = wait_query(page, &frame, &part, selector, deadline, options.timeout).await?;
+        let element = wait_query(page, &frame, &part, selector, deadline, options.timeout, Some(tab_state)).await?;
         if last {
             return Ok(element);
         }
@@ -297,14 +298,14 @@ pub async fn selector_frame(page: &Arc<TabPage>, selector: &str, timeout: Durati
     let mut frame = page.main_frame();
     for part in &parts[..parts.len() - 1] {
         let part = normalize_selector(if part.is_empty() { "iframe" } else { part });
-        let element = wait_query(page, &frame, &part, selector, deadline, timeout).await?;
+        let element = wait_query(page, &frame, &part, selector, deadline, timeout, None).await?;
         let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(200));
         frame = page.content_frame(&element, remaining).await?;
     }
     Ok((frame, parts.last().cloned().unwrap_or_default()))
 }
 
-async fn wait_query(page: &Arc<TabPage>, frame: &str, part: &str, full: &str, deadline: Instant, timeout: Duration) -> Result<Element> {
+async fn wait_query(page: &Arc<TabPage>, frame: &str, part: &str, full: &str, deadline: Instant, timeout: Duration, tab_state: Option<&PageTab>) -> Result<Element> {
     loop {
         page.ensure_no_dialog()?;
         match page.call_element_result(frame, "query", vec![v(part), v(true)], true).await {
@@ -326,10 +327,70 @@ async fn wait_query(page: &Arc<TabPage>, frame: &str, part: &str, full: &str, de
             }
         }
         if Instant::now() >= deadline {
-            bail!("No element matches selector {full:?} (waited {} ms)", timeout.as_millis());
+            let hint = near_misses(page, frame, part, tab_state).await;
+            bail!("No element matches selector {full:?} (waited {} ms){hint}", timeout.as_millis());
         }
         tokio::time::sleep(POLL).await;
     }
+}
+
+#[derive(Deserialize)]
+struct NearMisses {
+    role: Option<String>,
+    items: Vec<NearMiss>,
+}
+
+#[derive(Deserialize)]
+struct NearMiss {
+    role: String,
+    name: String,
+    #[serde(rename = "ref")]
+    ref_id: Option<String>,
+}
+
+/// What the frame has instead of the selector's match, as a suffix for the no-match error: the closest elements of
+/// the selector's role (or with its name), with their snapshot refs while those are current. Empty when the selector
+/// has no role or text to compare, or the lookup fails.
+async fn near_misses(page: &Arc<TabPage>, frame: &str, part: &str, tab_state: Option<&PageTab>) -> String {
+    let lookup = page.call_value(frame, "nearMisses", vec![v(part)], true);
+    let Ok(Ok(value)) = tokio::time::timeout(Duration::from_secs(2), lookup).await else { return String::new() };
+    let Ok(Some(found)) = serde_json::from_value::<Option<NearMisses>>(value) else { return String::new() };
+    let current_ref = |id: &str| -> bool {
+        let Some(tab_state) = tab_state else { return false };
+        let refs = tab_state.refs.lock().unwrap();
+        if refs.tab != Some(page.tab()) || refs.document != page.frame(&page.main_frame()).map(|f| f.generation) {
+            return false;
+        }
+        match refs.selectors.get(id).map(|target| &target.frame) {
+            Some(None) => frame == page.main_frame(),
+            Some(Some((owner, generation))) => owner == frame && page.frame(owner).map(|f| f.generation) == Some(*generation),
+            None => false,
+        }
+    };
+    format_near_misses(&found, if frame == page.main_frame() { "page" } else { "frame" }, current_ref)
+}
+
+fn format_near_misses(found: &NearMisses, place: &str, current_ref: impl Fn(&str) -> bool) -> String {
+    let lines: Vec<String> = found
+        .items
+        .iter()
+        .map(|item| {
+            let name = if item.name.is_empty() { String::new() } else { format!(" {:?}", truncate(&item.name, 80)) };
+            let reference = item.ref_id.as_deref().filter(|id| current_ref(id)).map(|id| format!(" [ref={id}]")).unwrap_or_default();
+            format!("  - {}{name}{reference}", item.role)
+        })
+        .collect();
+    let same_role = found.role.as_ref().is_some_and(|role| found.items.iter().all(|item| &item.role == role));
+    match (&found.role, lines.is_empty()) {
+        (Some(role), true) => format!(".\nThe {place} has no {role}."),
+        (None, true) => format!(".\nNo element in the {place} has a similar name."),
+        (Some(role), false) if !same_role => format!(".\nThe {place} has no {role}. Elements with a similar name:\n{}", lines.join("\n")),
+        _ => format!(".\nClosest elements in the {place}:\n{}", lines.join("\n")),
+    }
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max { text.to_string() } else { format!("{}...", text.chars().take(max).collect::<String>()) }
 }
 
 #[cfg(test)]
