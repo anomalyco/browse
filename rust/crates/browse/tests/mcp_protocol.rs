@@ -320,35 +320,32 @@ fn list_tabs(mcp: &mut Mcp) -> Value {
     text(&mcp.request("tools/call", json!({ "name": "tabs", "arguments": {}, "_meta": modern_meta() })))
 }
 
-/// The Skills extension: browse serves its instructions as skill://browse/SKILL.md to every client, and a client that
-/// declares the extension gets a pointer to it as its instructions instead of the full text.
+/// The Skills extension: a client that declares it gets browse's instructions as skill://browse/SKILL.md and no
+/// `instructions`; any other client gets `instructions` and no skill.
 #[test]
-fn mcp_serves_its_instructions_as_a_skill() {
+fn mcp_serves_its_instructions_as_a_skill_or_as_instructions() {
     let home: PathBuf = std::env::temp_dir().join(format!("browse-mcp-skills-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
     let port = free_port();
     let skills = json!({ "extensions": { "io.modelcontextprotocol/skills": {} } });
 
-    // A client without the extension keeps the full instructions, and can still read the skill as a resource.
+    // Without the extension: instructions, and nothing about skills.
     let mut plain = Mcp::start(&home, port);
     let init = plain.request("initialize", json!({ "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "opencode", "version": "test" } }));
     let full = init["instructions"].as_str().unwrap_or_default().to_string();
     assert!(full.contains("Pass that `tab` to every other tool"), "{init}");
-    assert!(init["capabilities"]["extensions"].get("io.modelcontextprotocol/skills").is_some(), "{init}");
-    assert!(init["capabilities"].get("resources").is_some(), "{init}");
-    let read = plain.request("resources/read", json!({ "uri": "skill://browse/SKILL.md" }));
-    let file = read["contents"][0]["text"].as_str().unwrap_or_default().to_string();
-    assert!(file.starts_with("---\nname: browse\ndescription: "), "{file}");
-    assert!(file.contains(full.trim_end()), "the skill carries the instructions: {file}");
+    assert_eq!(init["capabilities"], json!({ "tools": { "listChanged": false } }), "{init}");
+    assert_eq!(plain.request("resources/list", json!({}))["resources"], json!([]));
 
-    // A 2026-07-28 client that declares the extension gets a pointer, and the skill's manifest matches its file.
+    // A 2026-07-28 client that declares it: the skill, and no instructions.
     let mut modern = Mcp::start(&home, port);
     let mut meta = modern_meta();
     meta["io.modelcontextprotocol/clientCapabilities"] = skills.clone();
     let discover = modern.request("server/discover", json!({ "_meta": meta }));
-    let pointer = discover["instructions"].as_str().unwrap_or_default();
-    assert!(pointer.contains("skill://browse/SKILL.md") && pointer.len() < 300, "{discover}");
+    assert!(discover.get("instructions").is_none(), "{discover}");
+    assert!(discover["capabilities"]["extensions"].get("io.modelcontextprotocol/skills").is_some(), "{discover}");
+    assert!(discover["capabilities"].get("resources").is_some(), "{discover}");
     let listed = modern.request("skills/list", json!({ "_meta": meta }));
     assert_eq!(listed["resultType"], "complete", "{listed}");
     let entry = &listed["skills"][0];
@@ -358,14 +355,17 @@ fn mcp_serves_its_instructions_as_a_skill() {
     assert_eq!(&got["skill"], entry, "{got}");
     let content = modern.request("resources/read", json!({ "_meta": meta, "uri": "skill://browse/SKILL.md" }));
     let text = content["contents"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.starts_with("---\nname: browse\ndescription: "), "{text}");
+    assert!(text.contains(full.trim_end()), "the skill carries the instructions: {text}");
     use sha2::{Digest, Sha256};
     let digest: String = Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(entry["resources"][0]["digest"], format!("sha256:{digest}"), "the digest covers the served bytes");
     assert_eq!(entry["resources"][0]["size"], text.len(), "{entry}");
 
-    // An older client that declares it in initialize gets the pointer too.
+    // An older client that declares it in initialize gets the skill, not instructions.
     let mut legacy = Mcp::start(&home, port);
     let init = legacy.request("initialize", json!({ "protocolVersion": "2025-11-25", "capabilities": skills, "clientInfo": { "name": "opencode", "version": "test" } }));
-    assert!(init["instructions"].as_str().unwrap_or_default().contains("skill://browse/SKILL.md"), "{init}");
+    assert!(init.get("instructions").is_none(), "{init}");
+    assert_eq!(legacy.request("skills/list", json!({}))["skills"][0]["uri"], "skill://browse/SKILL.md");
     let _ = std::fs::remove_dir_all(&home);
 }

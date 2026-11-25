@@ -28,12 +28,11 @@ const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const META_CLIENT: &str = "io.modelcontextprotocol/clientInfo";
 const META_SERVER: &str = "io.modelcontextprotocol/serverInfo";
 const META_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
-/// The Skills extension (SEP-2640): browse serves its instructions as one skill, and a client that declares the
-/// extension gets a pointer to it in `instructions` instead of the full text.
+/// The Skills extension (SEP-2640): a client that declares it gets browse's instructions as one skill instead of as
+/// `instructions`; every other client gets `instructions` and no skill.
 const SKILLS: &str = "io.modelcontextprotocol/skills";
 const SKILL_URI: &str = "skill://browse/SKILL.md";
 const SKILL_DESCRIPTION: &str = "How to drive the user's real browser with browse's tools: tabs, snapshot refs, verifying each step, handing logins to the user and closing tabs. Read it before using browse's tools.";
-const SKILL_POINTER: &str = "browse drives the user's real browser. Before using its tools, read the browse skill (skill://browse/SKILL.md): it has the rules for tabs, refs, handoffs and cleanup.";
 
 #[derive(Default)]
 struct Running {
@@ -103,26 +102,32 @@ pub fn run() -> anyhow::Result<()> {
                 let version = PROTOCOLS.iter().find(|v| **v == asked).unwrap_or(&PROTOCOLS[0]);
                 client = params.pointer("/clientInfo/name").and_then(Value::as_str).unwrap_or_default().to_string();
                 skills = params.get("capabilities").is_some_and(declares_skills);
-                reply(&out, id, json!({
+                let mut result = json!({
                     "protocolVersion": version,
-                    "capabilities": capabilities(json!({"tools": {"listChanged": false}})),
+                    "capabilities": capabilities(json!({"listChanged": false}), skills),
                     "serverInfo": {"name": "browse", "version": VERSION},
-                    "instructions": instructions(&client, skills),
-                }));
+                });
+                if !skills {
+                    result["instructions"] = json!(relay::instructions(&client));
+                }
+                reply(&out, id, result);
             }
             // The 2026-07-28 probe: this is what tells a client the server speaks the modern era, and what it lists
             // as the tools, instructions and capabilities a pooled connection gets.
             "server/discover" => {
                 modern = true;
-                reply(&out, id, json!({
+                let mut result = json!({
                     "resultType": "complete",
                     "supportedVersions": [MODERN, PROTOCOLS[0], PROTOCOLS[1], PROTOCOLS[2], PROTOCOLS[3]],
-                    "capabilities": capabilities(json!({"tools": {}})),
-                    "instructions": instructions(&client, skills),
+                    "capabilities": capabilities(json!({}), skills),
                     "ttlMs": 0,
                     "cacheScope": "private",
                     "_meta": { META_SERVER: {"name": "browse", "version": VERSION} },
-                }));
+                });
+                if !skills {
+                    result["instructions"] = json!(relay::instructions(&client));
+                }
+                reply(&out, id, result);
             }
             "ping" => reply(&out, id, if modern { json!({ "resultType": "complete" }) } else { json!({}) }),
             "tools/list" => {
@@ -160,18 +165,18 @@ pub fn run() -> anyhow::Result<()> {
                 });
             }
             "resources/list" => {
-                let resources = json!([{ "uri": SKILL_URI, "name": "browse", "description": SKILL_DESCRIPTION, "mimeType": "text/markdown" }]);
+                let resources = if skills { json!([{ "uri": SKILL_URI, "name": "browse", "description": SKILL_DESCRIPTION, "mimeType": "text/markdown" }]) } else { json!([]) };
                 reply(&out, id, if modern { listed(json!({ "resources": resources })) } else { json!({ "resources": resources }) });
             }
             "resources/read" => match params.get("uri").and_then(Value::as_str) {
-                Some(SKILL_URI) => {
+                Some(SKILL_URI) if skills => {
                     let result = json!({ "contents": [{ "uri": SKILL_URI, "mimeType": "text/markdown", "text": skill_file(&client) }] });
                     reply(&out, id, if modern { cached(result) } else { result });
                 }
                 uri => unknown(&out, id, uri),
             },
-            "skills/list" => reply(&out, id, listed(json!({ "skills": [skill_entry(&client)] }))),
-            "skills/get" => match params.get("uri").and_then(Value::as_str) {
+            "skills/list" if skills => reply(&out, id, listed(json!({ "skills": [skill_entry(&client)] }))),
+            "skills/get" if skills => match params.get("uri").and_then(Value::as_str) {
                 Some(SKILL_URI) => reply(&out, id, cached(json!({ "skill": skill_entry(&client) }))),
                 uri => unknown(&out, id, uri),
             },
@@ -191,14 +196,10 @@ fn declares_skills(capabilities: &Value) -> bool {
     capabilities.get("extensions").and_then(|extensions| extensions.get(SKILLS)).is_some_and(|skills| !skills.is_null())
 }
 
-/// browse's capabilities: the given tools capability, the resources its skill is read through, and the extension.
-fn capabilities(tools: Value) -> Value {
-    json!({ "tools": tools, "resources": {}, "extensions": { SKILLS: {} } })
-}
-
-/// The full instructions, or for a client that loads skills, a pointer to the skill that carries them.
-fn instructions(client: &str, skills: bool) -> String {
-    if skills { SKILL_POINTER.to_string() } else { relay::instructions(client) }
+/// browse's capabilities: tools, plus for a client that loads skills, the resources its skill is read through and the
+/// extension.
+fn capabilities(tools: Value, skills: bool) -> Value {
+    if skills { json!({ "tools": tools, "resources": {}, "extensions": { SKILLS: {} } }) } else { json!({ "tools": tools }) }
 }
 
 /// The skill's SKILL.md: frontmatter, then the instructions this client would otherwise get.
