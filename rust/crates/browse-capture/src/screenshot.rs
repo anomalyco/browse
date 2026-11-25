@@ -293,7 +293,7 @@ impl Tool for ScreenshotTool {
                     "tab": tab_schema(),
                     "format": { "type": "string", "enum": ["png", "jpeg", "webp"], "description": "Image format (default png; jpeg/webp are much smaller)." },
                     "quality": { "type": "integer", "minimum": 0, "maximum": 100, "description": "jpeg/webp quality (default 80)." },
-                    "fullPage": { "type": "boolean", "description": "Capture the whole scrollable page instead of the viewport." },
+                    "fullPage": { "type": "boolean" },
                     "ref": { "type": "string", "description": "Snapshot ref of the element to capture (e.g. \"e12\" or an iframe ref \"f1e3\"); from the tab's latest snapshot." },
                     "selector": { "type": "string", "description": "Selector of the element to capture, as the page tools accept it." },
                     "timeoutMs": { "type": "integer", "minimum": 0, "maximum": 60000, "description": "How long to wait for the ref/selector element (default 5000)." },
