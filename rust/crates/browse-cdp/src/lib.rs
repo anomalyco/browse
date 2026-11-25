@@ -42,6 +42,22 @@ use crate::wire::map_cdp_error;
 const TILE_SIDE: f64 = 4_096.0;
 const MAX_TILED_PIXELS: u64 = 16 * 1024 * 1024;
 
+/// A screenshot clip is in device independent pixels, and page zoom makes one CSS pixel span `zoom` DIP, so every
+/// clip is converted before Chrome sees it. Rounding happens in DIP, after the conversion, so a whole CSS edge lands
+/// on the whole DIP Chrome paints.
+fn dip_clip((x, y, width, height): (f64, f64, f64, f64), zoom: f64) -> (f64, f64, f64, f64) {
+    let zoom = if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 };
+    ((x * zoom).round(), (y * zoom).round(), (width * zoom).round().max(1.0), (height * zoom).round().max(1.0))
+}
+
+/// Keeps a whole-DIP clip inside the whole-DIP viewport, moving it rather than shrinking it where possible.
+fn dip_clamp((x, y, width, height): (f64, f64, f64, f64), (vx, vy, vw, vh): (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    let (width, height) = (width.min(vw), height.min(vh));
+    let left = x.clamp(vx, vx + vw - width);
+    let top = y.clamp(vy, vy + vh - height);
+    (left, top, width, height)
+}
+
 fn next_document_id() -> DocumentId {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     DocumentId(NEXT.fetch_add(1, Ordering::Relaxed))
@@ -1003,13 +1019,15 @@ impl CdpTabDriver {
 
     async fn capture_tiled(&self, x: f64, y: f64, width: f64, height: f64, scale: f64) -> DriverResult<Vec<u8>> {
         let dpr = self.viewport().await?.device_pixel_ratio;
-        let per_css = scale * dpr;
-        let total_width = (width * per_css).round() as u64;
-        let total_height = (height * per_css).round() as u64;
+        // `x, y, width, height` are DIP and `scale` is image pixels per DIP before the screen scale, as
+        // Page.captureScreenshot reads it.
+        let per_dip = scale * dpr;
+        let total_width = (width * per_dip).round() as u64;
+        let total_height = (height * per_dip).round() as u64;
         if total_width * total_height > MAX_TILED_PIXELS {
             return Err(DriverError::Refused("too large to stitch (over 16 megapixels)".into()));
         }
-        let strip = (TILE_SIDE / per_css).floor().max(1.0);
+        let strip = (TILE_SIDE / per_dip).floor().max(1.0);
         let mut rgba = Vec::new();
         let mut stitched_height = 0u32;
         let expected_width = total_width as u32;
@@ -1659,10 +1677,25 @@ impl TabDriver for CdpTabDriver {
         let height = number(css, "clientHeight").unwrap_or(720.0);
         let content = metrics.get("cssContentSize").or_else(|| metrics.get("contentSize"));
         let device_width = number(metrics.get("visualViewport"), "clientWidth");
-        let zoom = number(css, "zoom").unwrap_or(1.0);
+        let page_zoom = number(css, "zoom").filter(|zoom| zoom.is_finite() && *zoom > 0.0).unwrap_or(1.0);
         let device_pixel_ratio = match (device_width, metrics.get("cssVisualViewport")) {
-            (Some(device), Some(_)) if width > 0.0 => (device / width / zoom.max(f64::EPSILON)).max(0.1),
+            (Some(device), Some(_)) if width > 0.0 => (device / width / page_zoom).max(0.1),
             _ => 1.0,
+        };
+        let content_width = number(content, "width").unwrap_or(width);
+        let content_height = number(content, "height").unwrap_or(height);
+        // cssContentSize is floored to whole CSS pixels. contentSize is the physical size in current Chrome, where
+        // cssVisualViewport is present, so it keeps the right/bottom edge that the floor loses at page zoom.
+        let (content_width, content_height) = match (metrics.get("contentSize"), metrics.get("cssVisualViewport")) {
+            (Some(physical), Some(_)) if width > 0.0 && page_zoom != 1.0 => (
+                content_width.max(number(Some(physical), "width").map_or(content_width, |value| {
+                    value / device_pixel_ratio / page_zoom
+                })),
+                content_height.max(number(Some(physical), "height").map_or(content_height, |value| {
+                    value / device_pixel_ratio / page_zoom
+                })),
+            ),
+            _ => (content_width, content_height),
         };
         let layout = metrics.get("cssLayoutViewport");
         let layout_width = number(layout, "clientWidth").filter(|w| *w > 0.0);
@@ -1674,8 +1707,9 @@ impl TabDriver for CdpTabDriver {
             height,
             layout_width,
             layout_height,
-            content_width: number(content, "width").unwrap_or(width),
-            content_height: number(content, "height").unwrap_or(height),
+            content_width,
+            content_height,
+            page_zoom,
             device_pixel_ratio: (device_pixel_ratio * 1000.0).round() / 1000.0,
         })
     }
@@ -1683,10 +1717,23 @@ impl TabDriver for CdpTabDriver {
     async fn screenshot(&self, shot: Screenshot) -> DriverResult<Image> {
         let (clip, beyond) = match shot.area {
             ScreenshotArea::Viewport => (None, false),
-            ScreenshotArea::Clip { rect, beyond_viewport } => (
-                Some((rect.x, rect.y, rect.width, rect.height, shot.scale)),
-                beyond_viewport,
-            ),
+            ScreenshotArea::Clip { rect, beyond_viewport } => {
+                let viewport = self.viewport().await?;
+                let zoom = viewport.page_zoom;
+                let (x, y, width, height) = dip_clip((rect.x, rect.y, rect.width, rect.height), zoom);
+                let (x, y, width, height) = if beyond_viewport {
+                    (x, y, width, height)
+                } else {
+                    let viewport_dip = (
+                        (viewport.page_x * zoom).round(),
+                        (viewport.page_y * zoom).round(),
+                        (viewport.width * zoom).round().max(1.0),
+                        (viewport.height * zoom).round().max(1.0),
+                    );
+                    dip_clamp((x, y, width, height), viewport_dip)
+                };
+                (Some((x, y, width, height, shot.scale)), beyond_viewport)
+            }
         };
         match self.capture_raw(shot.format, shot.quality, clip, beyond).await {
             Ok(bytes) => Ok(Image { bytes, format: shot.format, note: None }),
@@ -2037,6 +2084,27 @@ mod tests {
             loader_id: String::new(),
             session: session.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn a_clip_is_converted_to_dip_before_it_reaches_chrome() {
+        // 100 CSS pixels at 125% are 125 DIP; rounding happens once, in DIP.
+        assert_eq!(dip_clip((10.0, 20.0, 100.0, 50.0), 1.25), (13.0, 25.0, 125.0, 63.0));
+        assert_eq!(dip_clip((10.0, 20.0, 100.0, 50.0), 1.1), (11.0, 22.0, 110.0, 55.0));
+        assert_eq!(dip_clip((10.0, 20.0, 100.0, 50.0), 1.0), (10.0, 20.0, 100.0, 50.0));
+        // A missing or broken zoom leaves the clip as it was, and a clip is never empty.
+        for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(dip_clip((10.0, 20.0, 100.0, 50.0), zoom), (10.0, 20.0, 100.0, 50.0), "{zoom}");
+        }
+        assert_eq!(dip_clip((5.0, 5.0, 0.0, 0.0), 1.0), (5.0, 5.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn a_dip_clip_stays_inside_the_dip_viewport() {
+        assert_eq!(dip_clamp((10.0, 10.0, 20.0, 20.0), (0.0, 0.0, 100.0, 100.0)), (10.0, 10.0, 20.0, 20.0));
+        // Past the right edge it moves rather than shrinks.
+        assert_eq!(dip_clamp((90.0, 10.0, 20.0, 20.0), (0.0, 0.0, 100.0, 100.0)), (80.0, 10.0, 20.0, 20.0));
+        assert_eq!(dip_clamp((10.0, 10.0, 200.0, 200.0), (0.0, 0.0, 100.0, 100.0)), (0.0, 0.0, 100.0, 100.0));
     }
 
     #[test]

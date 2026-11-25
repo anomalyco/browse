@@ -524,6 +524,9 @@ pub struct Viewport {
     pub layout_height: Option<f64>,
     pub content_width: f64,
     pub content_height: f64,
+    /// Device independent pixels per CSS pixel (`cssVisualViewport.zoom`). Screenshot clips are in DIP, so page
+    /// geometry covers `page_zoom` times as many of them; 1.0 when the driver doesn't report a zoom.
+    pub page_zoom: f64,
     pub device_pixel_ratio: f64,
 }
 

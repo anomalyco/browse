@@ -203,7 +203,12 @@ async fn capture(
 ) -> anyhow::Result<Shot> {
     let viewport = page::viewport(driver).await?;
     let dpr = viewport.device_pixel_ratio;
-    let mut clip_scale = if css_scale { 1.0 / dpr } else { 1.0 };
+    let zoom = if viewport.page_zoom.is_finite() && viewport.page_zoom > 0.0 { viewport.page_zoom } else { 1.0 };
+    // A clip is in page CSS pixels; the driver sends it to Chrome in DIP (`zoom` DIP per CSS pixel). `scale` applies
+    // on top of the device scale, so one image pixel per CSS pixel divides by both the screen scale and the zoom, and
+    // device keeps the native scale.
+    let mut clip_scale = if css_scale { 1.0 / (dpr * zoom) } else { 1.0 };
+    let image_pixels_per_css = if css_scale { 1.0 } else { dpr * zoom };
     // The viewport's own clip keeps its size, so screenshot_diff baselines of the same viewport still match.
     let viewport_rect = (viewport.page_x.round(), viewport.page_y.round(), viewport.width.round(), viewport.height.round());
     let (x, y, width, height, beyond) = match region {
@@ -225,15 +230,15 @@ async fn capture(
         clamp_clip((x, y, width, height), viewport_rect)
     };
     let mut note = None;
-    let longest = width.max(height) * clip_scale * dpr;
+    let longest = width.max(height) * image_pixels_per_css;
     if longest > max_side {
         let factor = max_side / longest;
         clip_scale *= factor;
         note = Some(format!(
             "scaled down to {:.0}% to fit {max_side} px per side (the full capture would be {:.0}×{:.0} px); capture a clip or element for full detail{}",
             factor * 100.0,
-            width * clip_scale / factor * dpr,
-            height * clip_scale / factor * dpr,
+            width * image_pixels_per_css,
+            height * image_pixels_per_css,
             if max_side < MAX_SAVED_SIDE { ", or save to a path for up to 16384 px" } else { "" },
         ));
     }
@@ -514,8 +519,16 @@ mod tests {
     }
 
     fn fake() -> std::sync::Arc<FakeCdp> {
+        fake_sized(1, 1)
+    }
+
+    fn fake_sized(width: u32, height: u32) -> std::sync::Arc<FakeCdp> {
         let cdp = FakeCdp::new();
-        let image = crate::pixeldiff::Rgba { width: 1, height: 1, data: vec![0, 0, 0, 255] };
+        let image = crate::pixeldiff::Rgba {
+            width,
+            height,
+            data: [0, 0, 0, 255].repeat(width as usize * height as usize),
+        };
         cdp.reply(
             "Page.captureScreenshot",
             json!({ "data": base64::engine::general_purpose::STANDARD.encode(crate::pixeldiff::encode_png(&image).unwrap()) }),
@@ -524,12 +537,59 @@ mod tests {
     }
 
     fn layout(cdp: &FakeCdp, page_x: f64, page_y: f64, width: f64, height: f64, content_width: f64, content_height: f64) {
+        zoomed_layout(cdp, page_x, page_y, width, height, content_width, content_height, 1.0, 1.0);
+    }
+
+    /// `device_scale` is the screen's scale without page zoom; the CSS viewport is `width` × `height`.
+    #[allow(clippy::too_many_arguments)]
+    fn zoomed_layout(
+        cdp: &FakeCdp,
+        page_x: f64,
+        page_y: f64,
+        width: f64,
+        height: f64,
+        content_width: f64,
+        content_height: f64,
+        device_scale: f64,
+        zoom: f64,
+    ) {
+        zoomed_layout_with_content(
+            cdp,
+            page_x,
+            page_y,
+            width,
+            height,
+            content_width,
+            content_height,
+            content_width * device_scale * zoom,
+            content_height * device_scale * zoom,
+            device_scale,
+            zoom,
+        );
+    }
+
+    /// `physical_width` and `physical_height` are what Chrome puts in `contentSize`: device pixels in current Chrome.
+    #[allow(clippy::too_many_arguments)]
+    fn zoomed_layout_with_content(
+        cdp: &FakeCdp,
+        page_x: f64,
+        page_y: f64,
+        width: f64,
+        height: f64,
+        content_width: f64,
+        content_height: f64,
+        physical_width: f64,
+        physical_height: f64,
+        device_scale: f64,
+        zoom: f64,
+    ) {
         cdp.reply(
             "Page.getLayoutMetrics",
             json!({
-                "cssVisualViewport": { "pageX": page_x, "pageY": page_y, "clientWidth": width, "clientHeight": height, "zoom": 1.0 },
-                "visualViewport": { "clientWidth": width },
+                "cssVisualViewport": { "pageX": page_x, "pageY": page_y, "clientWidth": width, "clientHeight": height, "zoom": zoom },
+                "visualViewport": { "clientWidth": width * device_scale * zoom },
                 "cssContentSize": { "width": content_width, "height": content_height },
+                "contentSize": { "width": physical_width, "height": physical_height },
             }),
         );
     }
@@ -689,5 +749,127 @@ mod tests {
         let error = capture(driver_of(&cdp).as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.err().expect("the capture must fail");
         assert!(error.to_string().contains("no visible area"), "{error}");
         assert!(cdp.calls("Page.captureScreenshot").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_viewport_covers_the_visible_area() {
+        // The CSS viewport at 110% on a 1x screen: 1280 DIP is 1163.636 CSS pixels wide.
+        for (css, zoom, dip) in [
+            ((1163.6363525390625, 636.3636474609375), 1.100000023841858, (1280.0, 700.0)),
+            ((960.0, 700.0), 1.25, (1200.0, 875.0)),
+        ] {
+            let cdp = fake();
+            zoomed_layout(&cdp, 0.0, 0.0, css.0, css.1, css.0, css.1, 1.0, zoom);
+            capture(driver_of(&cdp).as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+
+            let (params, clip) = last_clip(&cdp);
+            assert_eq!(clip, (0.0, 0.0, dip.0, dip.1), "zoom {zoom}");
+            assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
+            let scale = params["clip"]["scale"].as_f64().unwrap();
+            assert!((scale - 1.0 / zoom).abs() < 1e-9, "zoom {zoom}: {params}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_clip_is_converted_to_dip() {
+        let cdp = fake();
+        zoomed_layout(&cdp, 10.0, 100.0, 960.0, 700.0, 960.0, 2400.0, 1.0, 1.25);
+        capture(driver_of(&cdp).as_ref(), &Region::Clip(20.0, 40.0, 100.0, 50.0), Format::Png, None, true, MAX_SAVED_SIDE)
+            .await
+            .unwrap();
+
+        let (params, clip) = last_clip(&cdp);
+        // 30, 140 CSS is 37.5, 175 DIP; 100×50 CSS is 125×62.5 DIP.
+        assert_eq!(clip, (38.0, 175.0, 125.0, 63.0));
+        assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
+    }
+
+    #[tokio::test]
+    async fn a_layout_without_a_zoom_is_not_zoomed() {
+        let cdp = fake();
+        // Chrome before cssVisualViewport.zoom: no zoom field, 2x screen.
+        cdp.reply(
+            "Page.getLayoutMetrics",
+            json!({
+                "cssVisualViewport": { "pageX": 10.0, "pageY": 100.0, "clientWidth": 960.0, "clientHeight": 700.0 },
+                "visualViewport": { "clientWidth": 1920.0 },
+                "cssContentSize": { "width": 960.0, "height": 2400.0 },
+            }),
+        );
+        capture(driver_of(&cdp).as_ref(), &Region::Clip(20.0, 40.0, 100.0, 50.0), Format::Png, None, true, MAX_SAVED_SIDE)
+            .await
+            .unwrap();
+
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (30.0, 140.0, 100.0, 50.0));
+        assert_eq!(params["clip"]["scale"], json!(0.5), "{params}");
+    }
+
+    #[tokio::test]
+    async fn css_and_device_scales_keep_their_pixels_at_page_zoom() {
+        // 2x screen at 125%: the visible 960 CSS pixels are 1200 DIP, and one image pixel per CSS pixel is 960 wide.
+        let cdp = fake_sized(960, 700);
+        zoomed_layout(&cdp, 0.0, 0.0, 960.0, 700.0, 960.0, 700.0, 2.0, 1.25);
+        let shot = capture(driver_of(&cdp).as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1200.0, 875.0));
+        assert_eq!(params["clip"]["scale"], json!(0.4), "{params}");
+        assert_eq!((shot.width, shot.height), (960, 700));
+        assert!((shot.scale - 1.0).abs() < 1e-9, "{}", shot.scale);
+
+        // Device keeps the native pixels: 1200 DIP at 2x is 2400 wide, 2.5 image pixels per CSS pixel.
+        let cdp = fake_sized(2400, 1750);
+        zoomed_layout(&cdp, 0.0, 0.0, 960.0, 700.0, 960.0, 700.0, 2.0, 1.25);
+        let shot = capture(driver_of(&cdp).as_ref(), &Region::Viewport, Format::Png, None, false, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1200.0, 875.0));
+        assert_eq!(params["clip"]["scale"], json!(1.0), "{params}");
+        assert_eq!((shot.width, shot.height), (2400, 1750));
+        assert!((shot.scale - 2.5).abs() < 1e-9, "{}", shot.scale);
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_full_page_keeps_the_floored_edge() {
+        let cdp = fake();
+        // Chrome floors 3001 physical px to 2400 CSS at 125%; 2400 * 1.25 would stop one DIP short.
+        zoomed_layout_with_content(&cdp, 0.0, 0.0, 960.0, 875.0, 2400.0, 2400.0, 3001.0, 3001.0, 1.0, 1.25);
+        capture(driver_of(&cdp).as_ref(), &Region::FullPage, Format::Png, None, false, MAX_SAVED_SIDE).await.unwrap();
+
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 3001.0, 3001.0));
+        assert_eq!(params["captureBeyondViewport"], json!(true), "{params}");
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_full_page_snaps_32_bit_metric_noise() {
+        let cdp = fake();
+        // 1280px at 110%: Chrome's 32-bit viewport and zoom make the physical content divide to 1280.0000155 CSS.
+        cdp.reply(
+            "Page.getLayoutMetrics",
+            json!({
+                "cssVisualViewport": { "pageX": 0.0, "pageY": 0.0, "clientWidth": 1163.6363525390625, "clientHeight": 700.0, "zoom": 1.100000023841858 },
+                "visualViewport": { "clientWidth": 1280.0 },
+                "cssContentSize": { "width": 1163.0, "height": 3000.0 },
+                "contentSize": { "width": 1280.0, "height": 3300.0 },
+            }),
+        );
+        capture(driver_of(&cdp).as_ref(), &Region::FullPage, Format::Png, None, false, MAX_SAVED_SIDE).await.unwrap();
+
+        let (_, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1280.0, 3300.0));
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_full_page_reports_the_downscale_note() {
+        let cdp = fake();
+        zoomed_layout(&cdp, 0.0, 0.0, 960.0, 700.0, 960.0, 2400.0, 1.0, 1.25);
+        let shot = capture(driver_of(&cdp).as_ref(), &Region::FullPage, Format::Png, None, true, 600.0).await.unwrap();
+
+        let (params, _) = last_clip(&cdp);
+        assert_eq!(params["clip"]["scale"], json!(0.2), "{params}");
+        let note = shot.note.expect("a downscale note");
+        // One image pixel per CSS pixel: 2400 image pixels tall for 2400 CSS pixels.
+        assert!(note.contains("scaled down to 25%"), "{note}");
+        assert!(note.contains("960×2400 px"), "{note}");
     }
 }

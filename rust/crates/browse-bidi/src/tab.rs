@@ -1237,6 +1237,8 @@ impl TabDriver for BiDiTabDriver {
             layout_height: number(5).filter(|h| *h > 0.0),
             content_width: number(6).filter(|w| *w > 0.0).unwrap_or(width),
             content_height: number(7).filter(|h| *h > 0.0).unwrap_or(height),
+            // BiDi boxes are CSS pixels and its screenshots don't apply a page zoom, so geometry is already DIP-sized.
+            page_zoom: 1.0,
             device_pixel_ratio: number(8).filter(|d| *d > 0.0).unwrap_or(1.0),
         })
     }
