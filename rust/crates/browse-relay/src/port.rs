@@ -75,7 +75,7 @@ pub async fn probe(port: u16, timeout: Duration) -> PortOwner {
     match crate::client::request(port, "GET", "/version", &[], None, timeout).await {
         Ok(response) => {
             let body = response.json();
-            let browse = body.as_ref().is_some_and(|b| b["version"].is_string() && b["instanceId"].is_string());
+            let browse = body.as_ref().is_some_and(crate::protocol::is_browse_version);
             let starting = body.as_ref().is_some_and(|b| b["code"] == "relay-starting");
             if (response.status == 200 && browse) || (response.status == 503 && starting) { PortOwner::Browse } else { PortOwner::Other }
         }

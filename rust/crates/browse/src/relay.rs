@@ -23,7 +23,7 @@ pub fn probe() -> Probe {
         Err(http::Error::Unreachable(_)) => Probe::Absent,
         Err(error) => Probe::Foreign(format!("{endpoint} didn't answer /version: {error}")),
         Ok(response) => match serde_json::from_slice::<Value>(&response.body) {
-            Ok(version) if response.status == 200 && version.get("version").is_some_and(Value::is_string) => Probe::Running(version),
+            Ok(version) if response.status == 200 && browse_relay::protocol::is_browse_version(&version) => Probe::Running(version),
             // A relay still starting up answers 503.
             _ if response.status == 503 => Probe::Absent,
             _ => Probe::Foreign(format!(
