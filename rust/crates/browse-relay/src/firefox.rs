@@ -511,12 +511,31 @@ pub fn driver_key(profile: &Path) -> String {
     format!("driver:bidi:{}", profile.display())
 }
 
+/// The relay's key when launching a Firefox-family app without reading its profile folder (e.g. macOS App Data TCC).
+pub fn app_driver_key(kind: AppKind) -> String {
+    format!("driver:bidi:app:{}", kind.id())
+}
+
+/// True when a loopback WebDriver BiDi URL's port accepts TCP connections right now.
+pub fn live_endpoint(url: &str) -> bool {
+    let Some(authority) = url.strip_prefix("ws://").and_then(|rest| rest.split('/').next()) else {
+        return false;
+    };
+    let Ok(addr) = authority.parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    addr.ip().is_loopback() && std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).is_ok()
+}
+
 /// A profile `browse firefox` connected, which the relay attaches again whenever it listens.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedFirefox {
     pub app: String,
     pub exe: PathBuf,
     pub profile: PathBuf,
+    /// Loopback BiDi URL recorded when browse launched the app without access to its profile folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     #[serde(default)]
     pub dedicated: bool,
     #[serde(default)]
@@ -536,6 +555,14 @@ impl RecordedFirefox {
 
     pub fn display_name(&self) -> String {
         self.name.clone().or_else(|| self.kind().map(|k| k.name().to_string())).unwrap_or_else(|| "Firefox".into())
+    }
+
+    pub fn driver_key(&self) -> String {
+        if self.profile.as_os_str().is_empty() {
+            format!("driver:bidi:app:{}", self.app)
+        } else {
+            driver_key(&self.profile)
+        }
     }
 }
 
@@ -566,18 +593,24 @@ fn write_recorded(paths: &Paths, profiles: Vec<RecordedFirefox>) -> io::Result<(
 /// Records a profile (replacing an earlier record of it). A profile browse added prefs to keeps that note.
 pub fn record(paths: &Paths, mut entry: RecordedFirefox) -> io::Result<()> {
     let mut profiles = read_recorded(paths);
-    if let Some(previous) = profiles.iter().find(|p| p.profile == entry.profile) {
+    let key = entry.driver_key();
+    if let Some(previous) = profiles.iter().find(|p| p.driver_key() == key) {
         entry.prefs_added |= previous.prefs_added;
     }
-    profiles.retain(|p| p.profile != entry.profile);
+    profiles.retain(|p| p.driver_key() != key);
     profiles.push(entry);
     write_recorded(paths, profiles)
 }
 
 /// Forgets a profile; returns its record.
 pub fn forget(paths: &Paths, profile: &Path) -> io::Result<Option<RecordedFirefox>> {
+    forget_key(paths, &driver_key(profile))
+}
+
+/// Forgets a recorded Firefox entry by its driver key.
+pub fn forget_key(paths: &Paths, key: &str) -> io::Result<Option<RecordedFirefox>> {
     let mut profiles = read_recorded(paths);
-    let Some(index) = profiles.iter().position(|p| p.profile == profile) else { return Ok(None) };
+    let Some(index) = profiles.iter().position(|p| p.driver_key() == key) else { return Ok(None) };
     let removed = profiles.remove(index);
     write_recorded(paths, profiles)?;
     Ok(Some(removed))
@@ -796,6 +829,13 @@ pub fn remove_browse_prefs(profile: &Path) -> io::Result<bool> {
 pub fn next_step_hint(discovery: Option<&Discovery>, recorded: &[RecordedFirefox], busy: &[String]) -> Option<String> {
     for record in recorded {
         let name = record.display_name();
+        let key = record.driver_key();
+        if record.profile.as_os_str().is_empty() {
+            if record.endpoint.as_deref().is_some_and(live_endpoint) && busy.contains(&key) {
+                return Some(format!(" {name} already has another WebDriver BiDi client: close it, or run `browse firefox --relaunch` (ask the user first)."));
+            }
+            continue;
+        }
         match state(&record.profile) {
             ProfileState::RunningNoBidi { .. } => {
                 return Some(format!(
@@ -803,9 +843,9 @@ pub fn next_step_hint(discovery: Option<&Discovery>, recorded: &[RecordedFirefox
                 ));
             }
             ProfileState::Unreadable(_) => {
-                return Some(format!(" browse can't read {name}'s profile folder from here: ask the user to run `browse firefox` in their own terminal."));
+                return Some(format!(" browse can't read {name}'s profile folder from here: run `browse firefox` to connect its default profile, or `browse firefox --dedicated` for a separate profile."));
             }
-            ProfileState::Listening { .. } if busy.contains(&driver_key(&record.profile)) => {
+            ProfileState::Listening { .. } if busy.contains(&key) => {
                 return Some(format!(" {name} already has another WebDriver BiDi client: close it, or run `browse firefox --relaunch` (ask the user first)."));
             }
             _ => {}
