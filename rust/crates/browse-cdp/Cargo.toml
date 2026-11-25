@@ -9,6 +9,8 @@ anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 browse-core.workspace = true
+# Encodes JPEG screenshots cut out of a viewport capture (no dependencies of its own).
+jpeg-encoder = "0.6"
 png = "0.18"
 serde.workspace = true
 serde_json.workspace = true
