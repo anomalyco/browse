@@ -539,7 +539,16 @@ async fn network(r: &mut Run<'_>) -> anyhow::Result<()> {
     r.sites().clear_log();
     r.ok("run", "click", json!({ "tab": tab, "selector": "#run" })).await?;
     r.ok("done", "wait_for", json!({ "tab": tab, "text": "done aborted", "timeout": 10000 })).await?;
-    r.ok("status", "network", json!({ "tab": tab, "action": "status" })).await?;
+    // A finished request is only counted once its finalizer builds the entry (it may fetch the response body, and
+    // Chromium can hold a finished request briefly for extra header info), so status can be short by one or more
+    // exchanges. Wait for every request the fixture served before recording the counters.
+    let expected = r.sites().requests("/api/").len() as u64;
+    let (settled, status) =
+        r.eventually("status", "network", json!({ "tab": tab, "action": "status" }), Duration::from_secs(5), |status| {
+            status["entryCount"].as_u64() == Some(expected)
+        })
+        .await?;
+    r.check("status-settled", settled, json!({ "expected": expected, "entryCount": status["entryCount"] }));
     let stopped = r.ok("stop", "network", json!({ "tab": tab, "action": "stop" })).await?;
     r.sites().open_gate("abort");
     let served: Vec<String> = r.sites().requests("/api/").iter().map(|q| format!("{} {}", q.method, q.path())).collect();
