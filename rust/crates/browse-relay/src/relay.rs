@@ -570,6 +570,8 @@ pub struct Relay {
     pub origins: HashSet<String>,
     pub file_roots: Vec<PathBuf>,
     pub auto_update: Option<AutoUpdateStatus>,
+    /// Idle cleanup for directly driven tabs (OPENCODE_BROWSER_IDLE_TAB_TTL_MS; None: never). Extension tabs follow
+    /// their browser's idleMinutes setting instead (`serve::reap_idle`).
     pub idle_tab_ttl: Option<Duration>,
     pub state: Mutex<State>,
     pub changed: Notify,
