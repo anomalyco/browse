@@ -245,6 +245,21 @@ async fn table_rows_name_their_columns_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn elements_without_a_name_show_none() {
+    let h = harness!(false);
+    let url = h.server.page("/unnamed", "<!doctype html><title>Unnamed</title><button onclick=\"this.textContent='Saved'\"></button><input name=q><ul><li>One</li><li>Two</li></ul>");
+    h.json("navigate", json!({ "url": url })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    let button = ref_of(&snapshot, "- button [");
+    assert!(snapshot.contains("- textbox \"q\" [ref="), "a name attribute still names it: {snapshot}");
+    assert!(snapshot.contains("- list [2 items]"), "{snapshot}");
+    assert!(!snapshot.contains("\"button\"") && !snapshot.contains("\"List\""), "{snapshot}");
+    // The ref works the same without a name.
+    h.ok("click", json!({ "ref": button })).await;
+    assert!(h.ok("snapshot", json!({})).await.contains("- button \"Saved\""));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn refs_carry_through_find_snapshots() {
     let h = harness!(false);
     let url = h.server.page("/refs-find", "<!doctype html><button>Start</button>");

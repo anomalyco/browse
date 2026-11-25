@@ -862,6 +862,8 @@ const captureSnapshotInBrowser = (
       : ""
     const name = truncate(displayName || fallbackName, isParagraph || isSafetyText || isStructural ? 180 : 120)
     if (!name) continue
+    // A stand-in like "List" or the role itself isn't a name the element has, so it isn't printed as one.
+    const unnamed = !displayName && (!isInteractive || fallbackName === role)
     const details = isHeading ? `level=${headingDepth(element) + 1}` : isFrame ? frameSource(element) : detailsFor(element)
     const primaryLink = (role === "link" && isPrimaryLink(element)) || headerCandidateSet.has(element)
     const baseDepth = headingDepth(element)
@@ -890,6 +892,7 @@ const captureSnapshotInBrowser = (
       ...(parentKeys.length > 0 ? { parentKeys } : {}),
       role,
       name,
+      ...(unnamed ? { unnamed: true } : {}),
       ...(element === root ? { root: true } : {}),
       ...(isInteractive && identityName && !labelProxy ? { identityName } : {}),
       ...(labelProxy ? { selectorRole: "label" } : {}),

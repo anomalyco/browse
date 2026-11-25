@@ -33,6 +33,9 @@ pub struct Entry {
     pub parent_keys: Option<Vec<String>>,
     pub role: String,
     pub name: String,
+    /// `name` is a stand-in (the role, or "List" for a list), not the element's own, so the line shows none.
+    #[serde(default)]
+    pub unnamed: bool,
     pub identity_name: Option<String>,
     pub details: Option<String>,
     pub selector: Option<String>,
@@ -195,7 +198,11 @@ fn render_capture(capture: &Capture) -> RenderedCapture {
         .iter()
         .zip(&depths)
         .map(|(entry, depth)| RenderedEntry {
-            prefix: format!("{}- {} \"{}\"", "  ".repeat(*depth as usize), entry.role, escape_name(&entry.name)),
+            prefix: if entry.unnamed {
+                format!("{}- {}", "  ".repeat(*depth as usize), entry.role)
+            } else {
+                format!("{}- {} \"{}\"", "  ".repeat(*depth as usize), entry.role, escape_name(&entry.name))
+            },
             details: entry.details.clone(),
             selector: entry.selector.clone(),
             role: entry.selector.as_ref().map(|_| entry.selector_role.clone().unwrap_or_else(|| entry.role.clone())),
@@ -1163,6 +1170,8 @@ mod tests {
         .unwrap();
         let rendered = render_capture(&capture);
         assert_eq!(rendered.entries[0].prefix, "- list \"Items\"");
+        let unnamed: Capture = serde_json::from_value(json!({ "entries": [{ "depth": 0, "role": "link", "name": "link", "unnamed": true, "priority": 1 }] })).unwrap();
+        assert_eq!(render_capture(&unnamed).entries[0].prefix, "- link");
         assert_eq!(rendered.entries[1].prefix, "  - link \"One \\\"1\\\"\"");
         assert_eq!(rendered.entries[1].role.as_deref(), Some("link"));
         assert_eq!(rendered.entries[2].prefix, "    - button \"Go\"");

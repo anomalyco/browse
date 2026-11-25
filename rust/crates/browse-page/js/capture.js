@@ -1009,7 +1009,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
     const fallbackName = role === "group" ? "Group" : role === "dialog" || role === "alertdialog" ? "Dialog" : role === "listbox" ? "Listbox" : role === "menu" ? "Menu" : role === "table" ? "Table" : role === "list" ? "List" : role === "tablist" ? "Tab list" : isInteractive ? element.getAttribute("name") || element.getAttribute("data-testid") || element.getAttribute("data-test-id") || element.getAttribute("data-test") || role : "", name = truncate(displayName || fallbackName, isParagraph || isSafetyText || isStructural ? 180 : 120);
     if (!name)
       continue;
-    const details = isHeading ? `level=${headingDepth(element) + 1}` : isFrame ? frameSource(element) : detailsFor(element), primaryLink = role === "link" && isPrimaryLink(element) || headerCandidateSet.has(element), baseDepth = headingDepth(element), parentKeys = structuralParentKeys(element), overlayAncestor = element.closest?.("dialog, [role='dialog'], [role='alertdialog'], [role='listbox'], [role='menu']") ?? null, inActiveOverlay = Boolean((isInteractive || role === "dialog" || role === "alertdialog" || role === "listbox" || role === "menu") && overlayAncestor && overlayAncestor.getAttribute("aria-label") !== "slider" && overlayAncestor.getAttribute("aria-roledescription") !== "carousel"), labelProxy = (() => {
+    const unnamed = !displayName && (!isInteractive || fallbackName === role), details = isHeading ? `level=${headingDepth(element) + 1}` : isFrame ? frameSource(element) : detailsFor(element), primaryLink = role === "link" && isPrimaryLink(element) || headerCandidateSet.has(element), baseDepth = headingDepth(element), parentKeys = structuralParentKeys(element), overlayAncestor = element.closest?.("dialog, [role='dialog'], [role='alertdialog'], [role='listbox'], [role='menu']") ?? null, inActiveOverlay = Boolean((isInteractive || role === "dialog" || role === "alertdialog" || role === "listbox" || role === "menu") && overlayAncestor && overlayAncestor.getAttribute("aria-label") !== "slider" && overlayAncestor.getAttribute("aria-roledescription") !== "carousel"), labelProxy = (() => {
       if (!isInteractive)
         return;
       const label = visibleAssociatedLabel(element);
@@ -1029,6 +1029,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
       ...parentKeys.length > 0 ? { parentKeys } : {},
       role,
       name,
+      ...unnamed ? { unnamed: !0 } : {},
       ...element === root ? { root: !0 } : {},
       ...isInteractive && identityName && !labelProxy ? { identityName } : {},
       ...labelProxy ? { selectorRole: "label" } : {},

@@ -46,6 +46,8 @@ export type SnapshotEntry = {
   readonly parentKeys?: readonly string[]
   readonly role: string
   readonly name: string
+  /** `name` is a stand-in (the role, or "List" for a list), not the element's own; the line shows no name. */
+  readonly unnamed?: boolean
   readonly identityName?: string
   readonly details?: string
   readonly selector?: string
