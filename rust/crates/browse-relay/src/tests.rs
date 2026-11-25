@@ -1953,11 +1953,49 @@ async fn idle_cleanup_follows_the_extension_setting() {
     tool(&relay, "settings", json!({ "set": { "idleMinutes": 30 } })).await;
     idle_for(16);
     crate::serve::reap_idle(&relay, direct).await;
-    assert!(seen.commands("tabs.remove").is_empty(), "30 minutes outlasts the direct TTL");
+    assert!(seen.commands("tabs.remove").is_empty(), "the extension's 30 minute setting wins over the direct TTL");
     idle_for(31);
     crate::serve::reap_idle(&relay, direct).await;
     assert_eq!(seen.commands("tabs.remove").len(), 1, "past the setting it closes");
     assert!(!relay.st().tabs.contains_key(&tab));
+}
+
+/// The environment's idle time (OPENCODE_BROWSER_IDLE_TAB_TTL_MS, passed to `reap_idle` like the relay does) covers
+/// tabs no browser setting covers: 0 (`None`) never, and a time closes past it. An extension tab still follows its
+/// browser's idleMinutes setting.
+#[tokio::test]
+async fn environment_idle_time_covers_tabs_without_a_setting_only() {
+    use self::drivers_tests::{FakeBrowser, register};
+
+    let (h, _seen, _events) = connected("profile-env-idle", 430).await;
+    let relay = h.handle.relay.clone();
+    let fake = FakeBrowser::new();
+    register(&relay, &fake).await;
+    let browser = h.handle.browser();
+    let direct = browser.open_tab(None, &TabOptions { browser: Some("firefox".into()), ..TabOptions::default() }).await.unwrap().tab;
+    let idle_for = |tab: i64, minutes: u64| relay.st().tabs.get_mut(&tab).unwrap().last_used = std::time::Instant::now() - Duration::from_secs(minutes * 60);
+
+    // The env's 0 is None: a directly driven tab is never reaped.
+    idle_for(direct, 16);
+    crate::serve::reap_idle(&relay, None).await;
+    assert!(relay.st().tabs.contains_key(&direct), "0 (None) never reaps a directly driven tab");
+
+    // A time closes a directly driven tab past it, and leaves one under it.
+    crate::serve::reap_idle(&relay, Some(Duration::from_secs(20 * 60))).await;
+    assert!(relay.st().tabs.contains_key(&direct), "16 minutes is under the environment's 20");
+    idle_for(direct, 21);
+    crate::serve::reap_idle(&relay, Some(Duration::from_secs(20 * 60))).await;
+    assert!(!relay.st().tabs.contains_key(&direct), "21 minutes is past the environment's 20");
+
+    // A tab in the extension's browser still follows the extension's own setting, not the environment's value.
+    let ext = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    tool(&relay, "settings", json!({ "set": { "idleMinutes": 30 } })).await;
+    idle_for(ext, 16);
+    crate::serve::reap_idle(&relay, Some(Duration::from_secs(60))).await;
+    assert!(relay.st().tabs.contains_key(&ext), "the extension's 30 minutes wins over the 1 minute environment value");
+    idle_for(ext, 31);
+    crate::serve::reap_idle(&relay, Some(Duration::from_secs(60))).await;
+    assert!(!relay.st().tabs.contains_key(&ext), "past the extension's 30 minutes the tab closes");
 }
 
 #[tokio::test]
