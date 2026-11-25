@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use crate::domain;
 use crate::guardrails::is_restricted_url;
 use crate::link::{Link, RpcError};
-use crate::protocol::{CAPABILITY_KEEP_OPEN, CAPABILITY_TAB_RELEASE, CAPABILITY_TAB_WINDOWS};
+use crate::protocol::{CAPABILITY_TAB_RELEASE, CAPABILITY_TAB_WINDOWS};
 
 /// Why newWindow and windowOf don't work in a directly driven browser.
 const DIRECT_WINDOWS: &str = "newWindow and windowOf work in browsers browse reaches through its extension, not in a directly driven one (Firefox); open the tab without them.";
@@ -49,6 +49,9 @@ pub struct Attach {
     pub reclaim_held: bool,
     /// Look up who owned the tab before (a reconnect, a relay restart). A user's lend restores nothing.
     pub restore: bool,
+    /// A tab that was already an agent tab (a reconnect, a renewed debugger, a relay reclaiming it): the agent was
+    /// already told about its keepOpen, so attaching it again must not warn about it.
+    pub reattached: bool,
     /// Register the tab fresh (an opened popup): a disallowed first document closes it rather than blanking it.
     pub fresh_popup: bool,
     /// Only this page: a tab id that now shows another page (the browser restarted) is let go again.
@@ -70,6 +73,7 @@ impl Attach {
             already_attached: false,
             reclaim_held: false,
             restore: false,
+            reattached: false,
             fresh_popup: false,
             expect_target: None,
             timeout: ATTACH_TIMEOUT,
@@ -85,6 +89,7 @@ impl Attach {
         attach.created_at = Some(tab.created_at.clone());
         attach.chosen = tab.chosen.clone();
         attach.fresh_popup = tab.fresh_popup;
+        attach.reattached = true;
         attach
     }
 }
@@ -186,8 +191,6 @@ impl Relay {
         }
         self.debugger(tab, None, "Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }), limit).await?;
         let keep_open = options.keep_open;
-        // The same page attached again (a renewed debugger): the agent was already told about its keepOpen.
-        let reattached = self.st().tabs.get(&tab).is_some_and(|t| t.target_id == target_id);
         {
             let mut st = self.st();
             let previous = st.tabs.remove(&tab);
@@ -251,11 +254,11 @@ impl Relay {
         // current value to an extension that knows keep-open: it keeps the flag per tracked tab, and a tab it released
         // stays tracked, so a stale true would otherwise never be cleared (sending false is harmless when untracked).
         // An extension that can't hold a tab gets a warning instead: the tab still opens, and only the relay keeps it.
-        // The warning is for a tab the agent just opened: a re-attach (a reconnect, a renewed debugger, a relay restart
-        // reclaiming the tab) must not tell it again.
+        // The warning is for a tab the agent just opened: an attach that reattaches an existing tab (a reconnect, a
+        // renewed debugger, a relay restart reclaiming it) must not tell it again.
         if link.keeps_open() {
             self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
-        } else if keep_open && !attach.restore && !reattached {
+        } else if keep_open && !attach.reattached {
             self.warn_keep_open_unavailable(tab, &link);
         }
         self.refresh_presentation(tab, true);
@@ -724,6 +727,7 @@ impl Relay {
             attach.already_attached = true;
             attach.reclaim_held = agent;
             attach.restore = true;
+            attach.reattached = true;
             attach.timeout = INVENTORY_TIMEOUT;
             for attempt in 0..3 {
                 match relay.setup_tab(attach.clone()).await {
@@ -838,7 +842,7 @@ impl Relay {
                 attach.chosen = known.chosen;
                 attach.expect_target = Some(target.clone());
                 // This is the tab as it was, not a new one: a keepOpen warning already reached the agent.
-                attach.restore = true;
+                attach.reattached = true;
                 match relay.setup_tab(attach).await {
                     Ok(_) => rlog!("extension.reconnect.reattached", tabId = tab),
                     Err(error) => rlog!("extension.reconnect.lost", tabId = tab, target = target, error = error.to_string()),

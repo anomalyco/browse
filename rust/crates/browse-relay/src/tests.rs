@@ -76,8 +76,8 @@ async fn next(socket: &mut Socket) -> Value {
     }
 }
 
-/// What the fake extension announces in its hello. A store extension that predates both (0.0.17) sends none.
-const CAPABILITIES: &[&str] = &["tab-release", "keep-open"];
+/// What a modern fake extension announces in its hello. Older ones get a slice of this where a test needs one.
+const CAPABILITIES: &[&str] = &["tab-release", "tab-windows", "keep-open"];
 /// The fake extension's version, except where a test is about an older extension.
 const TEST_VERSION: &str = "9.9.9";
 
@@ -94,8 +94,6 @@ fn hello_versioned(profile: &str, mode: &str, nonce: &str, ecdh: Option<&str>, c
     if let Some(key) = ecdh {
         pairing["ecdh"] = key.into();
     }
-    // A profile named `old-…` is an extension from before tab-windows.
-    let capabilities = if profile.starts_with("old-") { json!(["tab-release"]) } else { json!(["tab-release", "tab-windows"]) };
     json!({ "method": "hello", "params": {
         "version": version, "build": "test", "protocolVersion": 3, "capabilities": capabilities,
         "profileId": profile, "profileName": "browse", "browser": "Chrome", "name": "Test Chrome", "pairing": pairing,
@@ -1146,7 +1144,7 @@ async fn tabs_list_shows_each_tabs_window() {
 /// instead of reporting a tab placed where it wasn't asked, sends it no `follow`, and lists no windows.
 #[tokio::test]
 async fn an_older_extension_refuses_window_placement() {
-    let (h, seen, _events) = connected("old-profile", 130).await;
+    let (h, seen, _events) = connected_with_capabilities("old-profile", 130, &["tab-release"]).await;
     let relay = h.handle.relay.clone();
     let browser = h.handle.browser();
     let refused = browser.open_tab(None, &TabOptions { new_window: true, ..grouped("jobs") }).await.err().unwrap().to_string();
@@ -2158,6 +2156,7 @@ async fn an_older_extension_is_warned_about_keep_open_only_once() {
     let mut again = crate::tabs::Attach::new(kept, crate::relay::Owner::Relay);
     again.options = relay.st().tabs[&kept].options.clone();
     again.already_attached = true;
+    again.reattached = true;
     relay.setup_tab(again).await.unwrap();
     assert!(relay.st().tabs[&kept].warnings.is_empty(), "a re-attach must not warn again");
 
@@ -2176,6 +2175,39 @@ async fn an_older_extension_is_warned_about_keep_open_only_once() {
     events.send(json!({ "method": "debugger.attached", "params": { "tabId": 481, "agent": true } })).unwrap();
     eventually("the reclaimed tab", || relay.st().tabs.get(&481).is_some_and(|t| t.options.keep_open)).await;
     assert!(relay.st().tabs[&481].warnings.is_empty(), "a reclaimed tab must not warn again");
+}
+
+/// A reconnect that doesn't re-announce a keepOpen tab re-attaches it from the relay's record, without warning again.
+#[tokio::test]
+async fn a_reconnect_does_not_warn_about_keep_open_again() {
+    let h = harness().await;
+    let port = h.handle.port();
+    let relay = h.handle.relay.clone();
+    let profile = "profile-keep-open-reconnect";
+    let socket = pair_versioned(port, &h.paths, profile, &[], "0.0.17").await;
+    let (_seen, events) = fake_extension(socket, 490);
+    events.send(json!({ "method": "ready" })).unwrap();
+    eventually("the browser", || relay.st().connected()).await;
+
+    let opened = tool(&relay, "tabs", json!({ "action": "new", "id": "keep-me", "keepOpen": true })).await;
+    assert!(tool_text(&opened).contains("can't keep tabs open"), "{}", tool_text(&opened));
+    let kept = text(&serde_json::to_value(&opened).unwrap())["tab"].as_i64().unwrap();
+    assert!(relay.st().tabs[&kept].warnings.is_empty(), "the call that opened it took the warning");
+
+    // The extension goes away and comes back without announcing the tab again.
+    let link = relay.st().links[0].clone();
+    relay.link_closed(&link, "test");
+    eventually("the tab to be remembered", || !relay.st().tabs.contains_key(&kept) && relay.st().reconnect_owners.values().any(|known| known.tab == kept)).await;
+    drop(events);
+    let socket = pair_versioned(port, &h.paths, profile, &[], "0.0.17").await;
+    let (seen, events) = fake_extension(socket, 500);
+    events.send(json!({ "method": "ready" })).unwrap();
+    eventually("the browser back", || relay.st().connected()).await;
+
+    // The relay re-attached the tab itself: the agent already knows, so no second warning.
+    settled(&seen, kept).await;
+    assert!(relay.st().tabs.get(&kept).is_some_and(|t| t.options.keep_open), "the tab came back with its options");
+    assert!(relay.st().tabs[&kept].warnings.is_empty(), "a reconnect must not warn again");
 }
 
 #[test]
