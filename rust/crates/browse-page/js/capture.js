@@ -318,7 +318,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
       if (headerRow) {
         const headers = headerRow.headers;
         if (headers.length === values.length && headers.every(Boolean))
-          return values.map((value, index) => `${headers[index]}: ${value}`).join(" | ");
+          return isVisible(headerRow.row) && Boolean(root?.contains(headerRow.row)) ? values.join(" | ") : values.map((value, index) => `${headers[index]}: ${value}`).join(" | ");
       }
       if (headerCells.length === cells.length)
         return values.join(" | ");

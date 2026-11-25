@@ -221,6 +221,30 @@ async fn snapshot_main_scope_and_iframes_outside_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn table_rows_name_their_columns_once() {
+    let h = harness!(false);
+    let table = |id: &str, head: &str| format!("<table id={id}><thead{head}><tr><th>Team</th><th>Wins</th></tr></thead><tbody><tr id={id}-a><td>Islanders</td><td>25</td></tr><tr><td>Rangers</td><td>36</td></tr></tbody></table>");
+    let page = format!("<!doctype html><title>Teams</title>{}{}<button id=win onclick=\"document.querySelector('#shown tr:last-child td:last-child').textContent='37'\">Win</button>", table("shown", ""), table("hidden", " style=\"display:none\""));
+    let url = h.server.page("/teams", &page);
+    h.json("navigate", json!({ "url": url })).await;
+
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(snapshot.contains("- row \"Team | Wins\"\n  - row \"Islanders | 25\"\n  - row \"Rangers | 36\""), "{snapshot}");
+    // A hidden header row doesn't print, so its table's rows keep the column names.
+    assert!(snapshot.contains("- row \"Team: Islanders | Wins: 25\""), "{snapshot}");
+    let row = h.ok("snapshot", json!({ "within": "#shown-a" })).await;
+    assert!(row.contains("Team: Islanders | Wins: 25"), "{row}");
+
+    let found = h.ok("snapshot", json!({ "find": "Rangers", "context": 0 })).await;
+    assert!(found.contains("- row \"Team | Wins\"\n...\n  - row \"Rangers | 36\""), "{found}");
+
+    h.ok("snapshot", json!({})).await;
+    h.ok("click", json!({ "selector": "#win" })).await;
+    let diff = h.ok("snapshot", json!({ "diff": true })).await;
+    assert!(diff.contains("    row \"Team | Wins\"\n-   row \"Rangers | 36\"\n+   row \"Rangers | 37\""), "{diff}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn refs_carry_through_find_snapshots() {
     let h = harness!(false);
     let url = h.server.page("/refs-find", "<!doctype html><button>Start</button>");
