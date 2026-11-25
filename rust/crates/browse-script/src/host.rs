@@ -299,6 +299,12 @@ async fn run_async(ctx: ToolContext, tools: Arc<HashMap<String, Arc<dyn Tool>>>,
                 .collect();
             Ok(json!({ "tool": name, "text": text, "images": images }))
         }
+        // `page.bringToFront()`: through the browser's guarded path, so a refusal (a read-only tab, or the relay's
+        // foreground switch off) comes back here as an error the prelude reports as a warning.
+        "foreground" => {
+            let tab = tab_argument(&ctx, &payload).map_err(|e| format!("{e:#}"))?;
+            ctx.browser.bring_to_front(tab).await.map(|_| Value::Null).map_err(|e| format!("{e:#}"))
+        }
         "sleep" => {
             let ms = payload["ms"].as_f64().unwrap_or(0.0).clamp(0.0, 24.0 * 3600.0 * 1000.0);
             tokio::time::sleep(Duration::from_millis(ms as u64)).await;

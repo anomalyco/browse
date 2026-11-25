@@ -193,6 +193,10 @@ pub trait Browser: Send + Sync {
     async fn tab_driver(&self, tab: TabId) -> anyhow::Result<Arc<dyn TabDriver>>;
     async fn state(&self, tab: TabId) -> anyhow::Result<Arc<TabState>>;
     async fn handoff(&self, tab: TabId, message: &str) -> anyhow::Result<HandoffResult>;
+    /// Bring the tab and its window to the front. Browsers that can't return an error.
+    async fn bring_to_front(&self, _tab: TabId) -> anyhow::Result<()> {
+        anyhow::bail!("This browser doesn't support bringing a tab to the front")
+    }
     async fn human_input(&self, _tab: TabId) -> bool {
         true
     }

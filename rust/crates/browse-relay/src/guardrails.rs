@@ -106,6 +106,9 @@ pub(crate) fn env_on(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| v == "1")
 }
 
+/// The refusal for `Page.bringToFront` unless the relay's foreground switch is on.
+const FOREGROUND_REFUSAL: &str = "browse blocked Page.bringToFront: it raises the user's browser window over their work. Use the handoff tool when the user needs to act in the tab, or set OPENCODE_BROWSER_ALLOW_FOREGROUND=1 on the relay to allow it.";
+
 fn hostname(raw: &str) -> Option<String> {
     let url = url::Url::parse(raw).ok()?;
     url.host_str().filter(|h| !h.is_empty()).map(|h| h.trim_start_matches('[').trim_end_matches(']').to_lowercase())
@@ -160,6 +163,11 @@ fn storage_origins(params: &Value) -> Vec<String> {
 
 /// A rejection message when the command must be refused, else None.
 pub fn guard(method: &str, params: &Value, read_only: bool, page_urls: &dyn Fn() -> Vec<String>) -> Option<String> {
+    guard_with(method, params, read_only, env_on("OPENCODE_BROWSER_ALLOW_FOREGROUND"), page_urls)
+}
+
+/// [guard], with the foreground switch decided by the caller so it can be tested without the process env.
+fn guard_with(method: &str, params: &Value, read_only: bool, allow_foreground: bool, page_urls: &dyn Fn() -> Vec<String>) -> Option<String> {
     if let Some((_, reason)) = ALWAYS_BLOCKED.iter().find(|(m, _)| *m == method) {
         return Some(format!("browse blocked {method}: {reason}. This command is always blocked by the relay."));
     }
@@ -174,8 +182,8 @@ pub fn guard(method: &str, params: &Value, read_only: bool, page_urls: &dyn Fn()
     if read_only && !read_only_allowed(method) && !file_chooser_cleanup {
         return Some(browse_core::read_only_refusal(method));
     }
-    if method == "Page.bringToFront" && !env_on("OPENCODE_BROWSER_ALLOW_FOREGROUND") {
-        return Some("browse blocked Page.bringToFront: it raises the user's browser window over their work. Use the handoff tool when the user needs to act in the tab, or set OPENCODE_BROWSER_ALLOW_FOREGROUND=1 on the relay to allow it.".into());
+    if method == "Page.bringToFront" && !allow_foreground {
+        return Some(FOREGROUND_REFUSAL.into());
     }
     if matches!(method, "Storage.setCookies" | "Network.setCookies" | "Network.setCookie") && !env_on("OPENCODE_BROWSER_ALLOW_ALL_COOKIES") {
         let cookies: Vec<&Value> = if method == "Network.setCookie" {
@@ -294,5 +302,16 @@ mod tests {
         assert!(guard("DOMStorage.getDOMStorageItems", &json!({"storageId": {"securityOrigin": "https://bank.com"}}), false, &urls).is_some());
         let scoped = scope_result("Network.getCookies", json!({"cookies": [{"domain": "example.com"}, {"domain": "bank.com"}]}), &urls);
         assert_eq!(scoped["cookies"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bring_to_front_is_opt_in() {
+        let urls = || vec!["https://app.example.com/x".to_string()];
+        // Read-only is checked first, so a read-only tab never raises even when the switch allows it.
+        let read_only = guard_with("Page.bringToFront", &json!({}), true, true, &urls).expect("read-only tabs refuse Page.bringToFront");
+        assert!(read_only.contains("read-only"), "{read_only}");
+        let refused = guard_with("Page.bringToFront", &json!({}), false, false, &urls).expect("Page.bringToFront is refused without the switch");
+        assert!(refused.contains("OPENCODE_BROWSER_ALLOW_FOREGROUND=1"), "{refused}");
+        assert!(guard_with("Page.bringToFront", &json!({}), false, true, &urls).is_none());
     }
 }

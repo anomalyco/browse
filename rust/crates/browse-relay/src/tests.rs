@@ -1187,6 +1187,44 @@ async fn popups_inherit_their_openers_options() {
     assert!(!relay.st().tabs.contains_key(&97));
 }
 
+/// `page.bringToFront()` goes through the tab's guarded CDP connection: off by default, so Page.bringToFront never
+/// reaches Chrome; with OPENCODE_BROWSER_ALLOW_FOREGROUND=1 it does.
+#[tokio::test]
+async fn bring_to_front_is_opt_in() {
+    let (h, seen, _events) = connected("profile-foreground", 110).await;
+    let browser = h.handle.browser();
+    let tab = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    if crate::guardrails::env_on("OPENCODE_BROWSER_ALLOW_FOREGROUND") {
+        browser.bring_to_front(tab).await.unwrap();
+        eventually("Page.bringToFront to reach the extension", || !seen.cdp("Page.bringToFront").is_empty()).await;
+    } else {
+        let error = browser.bring_to_front(tab).await.unwrap_err().to_string();
+        assert!(error.contains("OPENCODE_BROWSER_ALLOW_FOREGROUND=1"), "{error}");
+        assert!(seen.cdp("Page.bringToFront").is_empty(), "Page.bringToFront was sent without the switch");
+    }
+}
+
+/// A read-only tab refuses `bring_to_front` before the foreground switch is consulted, and nothing reaches Chrome.
+#[tokio::test]
+async fn bring_to_front_refuses_read_only_without_sending() {
+    let (h, seen, _events) = connected("profile-foreground-read-only", 111).await;
+    let browser = h.handle.browser();
+    let options = TabOptions { read_only: true, ..TabOptions::default() };
+    let tab = browser.open_tab(None, &options).await.unwrap().tab;
+    let error = browser.bring_to_front(tab).await.unwrap_err().to_string();
+    assert!(error.contains("read-only"), "{error}");
+    assert!(seen.cdp("Page.bringToFront").is_empty(), "a read-only tab sent Page.bringToFront");
+}
+
+/// A tab browse doesn't know is refused before any CDP command is built.
+#[tokio::test]
+async fn bring_to_front_rejects_unknown_tabs() {
+    let (h, seen, _events) = connected("profile-foreground-unknown", 112).await;
+    let error = h.handle.browser().bring_to_front(4242).await.unwrap_err().to_string();
+    assert!(error.contains("isn't a browse tab"), "{error}");
+    assert!(seen.cdp("Page.bringToFront").is_empty(), "an unknown tab sent Page.bringToFront");
+}
+
 /// A popup attaches before its first navigation commits and reports no URL yet: that is nothing to check, so it stays
 /// open and the first document that really commits decides. Once one did, a later disallowed navigation blanks it
 /// rather than closing it (cli/src/session-manager/navigation-guard.ts).
