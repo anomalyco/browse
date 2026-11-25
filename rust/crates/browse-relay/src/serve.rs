@@ -825,7 +825,8 @@ pub(crate) async fn sweep_clients(relay: &Arc<Relay>) {
     }
 }
 
-/// The shortest idle time the extension's idleMinutes setting offers: no extension tab is reaped sooner.
+/// The shortest idle time the extension's idleMinutes setting offers: no extension tab is reaped sooner. Keep in
+/// step with the options page's list (10 min, 30 min, 1 hour, never; src/status/settings.tsx).
 const SHORTEST_IDLE_SETTING: Duration = Duration::from_secs(10 * 60);
 
 /// How long an extension tab may stay idle: the browser's idleMinutes setting (None for never). A browser that

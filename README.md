@@ -212,9 +212,9 @@ extension from your browser to finish.
   your window setting. `OPENCODE_BROWSER_AGENT_WINDOW` fixes placement, so labels don't move tabs while it's set.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
   you're looking at one (you can turn that off). Agents can't switch you to their tabs or bring a window to the front.
-  Tabs nobody touches for 10 minutes close by themselves (never while something runs on them). Closing agent tabs never
-  quits the browser or leaves it without a window: browse leaves a new tab (or window) behind when it would close the
-  last one.
+  Tabs nobody touches for 10 minutes close by themselves, or whatever idle close is set to below (never while
+  something runs on them). Closing agent tabs never quits the browser or leaves it without a window: browse leaves a
+  new tab (or window) behind when it would close the last one.
 - **Relay restarts keep agent tabs.** The relay saves the tabs agents opened and their options, and takes them back
   when it starts again (after an update, say).
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
@@ -343,7 +343,7 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
 | `OPENCODE_BROWSER_FILE_ROOTS` | More folders tools may read and write (path-list separated) |
 | `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in yours), overriding the options page; labelled tabs no longer follow their label's window |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed; overrides the options page |
-| `OPENCODE_BROWSER_IDLE_TAB_TTL_MS=900000` | When idle tabs close in a browser driven directly, without the extension (`0`: never). Extension tabs follow the options page's setting |
+| `OPENCODE_BROWSER_IDLE_TAB_TTL_MS=600000` | Idle close time for tabs in browsers browse drives directly, or an extension too old to have the setting (`0`: never). Agent and lent tabs in the extension follow the idle close setting |
 | `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Only tell about new versions (`off`: check, but never install or tell; `on`: install them, the default) |
 | `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long to wait for a bot check the browser clears by itself |
 | `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS=30000` | How long the relay waits for the extension to answer a command |

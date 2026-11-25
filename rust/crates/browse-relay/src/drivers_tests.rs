@@ -197,7 +197,7 @@ impl TabDriver for FakeTab {
     }
 }
 
-struct FakeBrowser {
+pub(super) struct FakeBrowser {
     info: DriverInfo,
     events: broadcast::Sender<BrowserEvent>,
     tabs: Mutex<HashMap<String, Arc<FakeTab>>>,
@@ -209,7 +209,7 @@ struct FakeBrowser {
 }
 
 impl FakeBrowser {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             info: DriverInfo { id: "bidi+ws".into(), name: "WebDriver BiDi".into(), protocol: "webdriver-bidi".into(), transport: "ws".into(), browser: "firefox 159.0".into() },
             events: broadcast::channel(256).0,
@@ -282,7 +282,7 @@ impl BrowserDriver for FakeBrowser {
     }
 }
 
-async fn register(relay: &Arc<Relay>, fake: &Arc<FakeBrowser>) -> Arc<crate::relay::DriverEntry> {
+pub(super) async fn register(relay: &Arc<Relay>, fake: &Arc<FakeBrowser>) -> Arc<crate::relay::DriverEntry> {
     let driver: Arc<dyn BrowserDriver> = fake.clone();
     relay.register_driver(driver, "driver:fake:1".into(), "Firefox".into(), Some("159.0".into()), Some("ws://127.0.0.1:1/session".into()), true).await.unwrap()
 }

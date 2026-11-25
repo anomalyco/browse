@@ -570,8 +570,9 @@ pub struct Relay {
     pub origins: HashSet<String>,
     pub file_roots: Vec<PathBuf>,
     pub auto_update: Option<AutoUpdateStatus>,
-    /// Idle cleanup for directly driven tabs (OPENCODE_BROWSER_IDLE_TAB_TTL_MS; None: never). Extension tabs follow
-    /// their browser's idleMinutes setting instead (`serve::reap_idle`).
+    /// Idle cleanup for directly driven tabs, or an extension too old to report its setting
+    /// (OPENCODE_BROWSER_IDLE_TAB_TTL_MS, the idle close setting's 10 minute default when unset; None: never).
+    /// Extension tabs follow their browser's idleMinutes setting instead (`serve::reap_idle`).
     pub idle_tab_ttl: Option<Duration>,
     pub state: Mutex<State>,
     pub changed: Notify,
@@ -611,6 +612,10 @@ pub struct RelayConfig {
     pub firefox: Option<crate::firefox::Discovery>,
 }
 
+/// The idle close setting's 10 minute default (src/shared/protocol.ts DEFAULT_IDLE_MINUTES): the idle time for tabs
+/// no browser setting covers.
+const DEFAULT_IDLE_TTL_MS: u64 = 10 * 60_000;
+
 fn env_ms(variable: &str, fallback: u64) -> Option<Duration> {
     let value = std::env::var(variable).ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(fallback);
     (value > 0).then(|| Duration::from_millis(value))
@@ -640,7 +645,7 @@ impl Relay {
             origins: crate::origins::allowed_extension_origins(),
             file_roots,
             auto_update: config.auto_update,
-            idle_tab_ttl: env_ms("OPENCODE_BROWSER_IDLE_TAB_TTL_MS", 15 * 60_000),
+            idle_tab_ttl: env_ms("OPENCODE_BROWSER_IDLE_TAB_TTL_MS", DEFAULT_IDLE_TTL_MS),
             state: Mutex::new(State {
                 links: Vec::new(),
                 drivers: Vec::new(),
