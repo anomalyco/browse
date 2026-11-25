@@ -136,12 +136,29 @@ export function relayPortCandidates(configuredPort = configuredRelayPort()): num
 
 export type RelayPortOwner = "browse" | "other" | "nobody"
 
-type BrowseVersion = { readonly version: string; readonly instanceId: string }
+type BrowseVersion = {
+  readonly version: string
+  readonly instanceId: string
+  readonly buildId: string
+  readonly startedAt: string
+  readonly shutdownProtocol: number
+}
 
-const browseVersion = (body: unknown): body is BrowseVersion =>
-  typeof body === "object" && body !== null &&
-  typeof (body as { version?: unknown }).version === "string" &&
-  typeof (body as { instanceId?: unknown }).instanceId === "string"
+/**
+ * Whether a `/version` answer is a browse relay's. Every browse relay has sent `buildId`, `startedAt` and a numeric
+ * `shutdownProtocol` beside `version` and `instanceId` (TypeScript v0.0.6 onward and the Rust relay alike). Another
+ * program's server on the port (Playwriter 0.12.0 answers `version`, `pid` and `activeExecutes`, sometimes an
+ * `instanceId`) does not send `buildId`, `startedAt` or `shutdownProtocol`.
+ */
+export const isBrowseVersion = (body: unknown): body is BrowseVersion => {
+  if (typeof body !== "object" || body === null) return false
+  const reply = body as Record<string, unknown>
+  return typeof reply.version === "string" &&
+    typeof reply.instanceId === "string" &&
+    typeof reply.buildId === "string" &&
+    typeof reply.startedAt === "string" &&
+    typeof reply.shutdownProtocol === "number"
+}
 
 const relayStarting = (body: unknown): boolean =>
   typeof body === "object" && body !== null && (body as { code?: unknown }).code === "relay-starting"
@@ -157,7 +174,7 @@ export async function probeRelayPort(port: number, timeoutMs = 500): Promise<Rel
       signal: AbortSignal.timeout(timeoutMs),
     })
     const body: unknown = await response.json().catch(() => undefined)
-    if (response.status === 200 && browseVersion(body)) return "browse"
+    if (response.status === 200 && isBrowseVersion(body)) return "browse"
     if (response.status === 503 && relayStarting(body)) return "browse"
     return "other"
   } catch {
@@ -174,7 +191,7 @@ async function browseVersionAt(port: number, timeoutMs: number): Promise<BrowseV
     })
     if (response.status !== 200) return undefined
     const body: unknown = await response.json().catch(() => undefined)
-    return browseVersion(body) ? body : undefined
+    return isBrowseVersion(body) ? body : undefined
   } catch {
     return undefined
   }

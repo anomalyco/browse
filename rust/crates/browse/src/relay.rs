@@ -17,28 +17,62 @@ pub enum Probe {
     Foreign(String),
 }
 
-pub fn probe() -> Probe {
+/// What one `/version` answer means.
+pub(crate) enum Answer {
+    Browse(Value),
+    Starting,
+    Other,
+}
+
+fn answer(status: u16, body: &[u8]) -> Answer {
+    match serde_json::from_slice::<Value>(body) {
+        Ok(version) if status == 200 && browse_relay::protocol::is_browse_version(&version) => Answer::Browse(version),
+        // A browse relay still starting answers 503 with this code; any other 503 is another program holding the port.
+        Ok(version) if status == 503 && version["code"].as_str() == Some("relay-starting") => Answer::Starting,
+        _ => Answer::Other,
+    }
+}
+
+/// One open `/version` answer at `endpoint`, with transport errors left for the caller to judge. A stop keeps this
+/// apart from a complete reply: a relay that reset or stalled may still be shutting down, unlike one that answered.
+pub(crate) fn answer_at(endpoint: &str, timeout: Duration) -> Result<Answer, http::Error> {
+    let response = http::request(endpoint, "GET", "/version", &[], None, Some(timeout))?;
+    Ok(answer(response.status, &response.body))
+}
+
+/// One endpoint and what answers its open `/version` there. A stop keeps both, so its token and its wait stay on
+/// the relay it verified.
+pub(crate) fn probe_endpoint() -> (String, Probe) {
     let endpoint = relay_api::endpoint();
-    match http::request(&endpoint, "GET", "/version", &[], None, Some(Duration::from_secs(5))) {
+    let probe = probe_at(&endpoint);
+    (endpoint, probe)
+}
+
+pub fn probe() -> Probe {
+    probe_endpoint().1
+}
+
+/// What answers a relay's open `/version` at `endpoint`. A handover passes the endpoint `/shutdown` went to: resolving
+/// it again after the old relay deletes relay.json falls back to the default port, where another program may answer.
+pub fn probe_at(endpoint: &str) -> Probe {
+    match answer_at(endpoint, Duration::from_secs(5)) {
         Err(http::Error::Unreachable(_)) => Probe::Absent,
         Err(error) => Probe::Foreign(format!("{endpoint} didn't answer /version: {error}")),
-        Ok(response) => match serde_json::from_slice::<Value>(&response.body) {
-            Ok(version) if response.status == 200 && browse_relay::protocol::is_browse_version(&version) => Probe::Running(version),
-            // A relay still starting up answers 503.
-            _ if response.status == 503 => Probe::Absent,
-            _ => Probe::Foreign(format!(
-                "port {} is in use by another program, so the browse relay can't start there. Stop that program, or pick another port for browse with OPENCODE_BROWSER_PORT (set it where your agent starts, then restart the agent)",
-                endpoint.rsplit(':').next().unwrap_or("")
-            )),
-        },
+        Ok(Answer::Browse(version)) => Probe::Running(version),
+        Ok(Answer::Starting) => Probe::Absent,
+        Ok(Answer::Other) => Probe::Foreign(format!(
+            "port {} is in use by another program, so the browse relay can't start there. Stop that program, or pick another port for browse with OPENCODE_BROWSER_PORT (set it where your agent starts, then restart the agent)",
+            endpoint.rsplit(':').next().unwrap_or("")
+        )),
     }
 }
 
 /// The running relay's /version, starting one when none is listening.
 pub fn ensure() -> anyhow::Result<Value> {
-    match probe() {
+    let (endpoint, found) = probe_endpoint();
+    match found {
         // A relay of the TypeScript browse can't serve this build: hand over to this one.
-        Probe::Running(version) if crate::legacy::is_legacy(&version) => crate::legacy::stop(&version, false)?,
+        Probe::Running(version) if crate::legacy::is_legacy(&version) => crate::legacy::stop(&endpoint, &version, false)?,
         Probe::Running(version) => return Ok(version),
         // Another program's server on the default port: a relay that may choose its port takes a free fallback one.
         Probe::Foreign(message) if browse_relay::port::pinned() => bail!(message),
@@ -59,25 +93,35 @@ pub fn ensure() -> anyhow::Result<Value> {
     }
 }
 
+/// The relay pid from its `/version`, when it is safe to signal: a positive `i32` and not this process. Parsing
+/// through `i32` first keeps a bogus huge pid from wrapping into a negative kill target.
+pub(crate) fn stop_pid(version: &Value) -> Option<u32> {
+    let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| i32::try_from(pid).ok()).filter(|pid| *pid > 0)?;
+    let pid = u32::try_from(pid).ok()?;
+    (pid != std::process::id()).then_some(pid)
+}
+
 /// Stops a running relay and waits until it's done: the tab registry and shutdown log are written before relay.json
 /// goes. Agent tabs stay open and the next relay takes them back.
 pub fn stop() -> anyhow::Result<bool> {
-    let version = match probe() {
+    let (endpoint, found) = probe_endpoint();
+    let version = match found {
         Probe::Running(version) => version,
         _ => return Ok(false),
     };
     if crate::legacy::is_legacy(&version) {
-        crate::legacy::stop(&version, true)?;
+        crate::legacy::stop(&endpoint, &version, true)?;
         return Ok(true);
     }
     let instance = version.get("instanceId").and_then(Value::as_str).unwrap_or_default().to_owned();
-    let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0 && *pid != std::process::id());
+    let pid = stop_pid(&version);
     let paths = relay_api::paths();
     let configured = browse_relay::port::configured_port();
     // The relay removes relay.json after its final tab write and shutdown log (serve.rs). While it still names this
     // instance, the files it writes as it exits may still come, so uninstall can't delete browse's folders yet.
     let recorded = browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance);
-    match send("POST", "/shutdown", &[], Some(b"{}"), Some(Duration::from_secs(10))) {
+    let auth = format!("Bearer {}", relay_api::token().unwrap_or_default());
+    match http::request(&endpoint, "POST", "/shutdown", &[("Authorization", auth.as_str())], Some(b"{}"), Some(Duration::from_secs(10))) {
         Ok(response) if (200..300).contains(&response.status) => {}
         // It stopped before answering: wait for it to finish with its files below.
         Err(http::Error::Unreachable(_)) => {}
@@ -86,7 +130,7 @@ pub fn stop() -> anyhow::Result<bool> {
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let answering = matches!(probe(), Probe::Running(v) if v.get("instanceId").and_then(Value::as_str) == Some(instance.as_str()));
+        let answering = matches!(probe_at(&endpoint), Probe::Running(v) if v.get("instanceId").and_then(Value::as_str) == Some(instance.as_str()));
         // relay.json is the relay's last write (serve.rs), so while it still names this instance the relay may still be
         // writing the tab registry and shutdown log. Without one, only its process going tells us it's done. A pid
         // reused by another process can hold the wait up, but only until the deadline below.
@@ -345,6 +389,37 @@ pub fn specs(client: Option<&str>) -> Vec<ToolSpec> {
     match probe() {
         Probe::Running(_) => tools(client).unwrap_or_else(|_| local()),
         _ => local(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A TypeScript browse relay (0.0.17, which legacy.rs takes over from): no `runtime`, but browse's own shape.
+    const OLD_BROWSE: &[u8] = br#"{"version":"0.0.17","buildId":"3f2a1c9d","instanceId":"b1d0c7f0-2f6a-4f43-9d0b-6a1d0f5e8c11","startedAt":"2026-11-01T12:00:00.000Z","pid":4242,"managed":true,"shutdownProtocol":2}"#;
+    /// This build's relay.
+    const RUST_BROWSE: &[u8] = br#"{"version":"0.1.3","buildId":"9e8d7c6b","instanceId":"0f4a2c11-8b7e-4b4d-9c1e-1a2b3c4d5e6f","startedAt":"2026-11-17T09:30:00.000Z","pid":5150,"managed":true,"shutdownProtocol":2,"runtime":"rust"}"#;
+
+    fn browse(body: &[u8]) -> bool {
+        matches!(answer(200, body), Answer::Browse(_))
+    }
+
+    #[test]
+    fn an_older_browse_relay_is_still_recognised() {
+        assert!(browse(OLD_BROWSE));
+        assert!(crate::legacy::is_legacy(&serde_json::from_slice(OLD_BROWSE).unwrap()));
+        assert!(browse(RUST_BROWSE));
+        assert!(!crate::legacy::is_legacy(&serde_json::from_slice(RUST_BROWSE).unwrap()));
+    }
+
+    #[test]
+    fn only_a_starting_relay_reads_as_absent() {
+        // This build's answer, and the TypeScript relay's from the first relay commit (cli/src/relay.ts, 3eb1f8e).
+        assert!(matches!(answer(503, br#"{"error":"browse relay is starting","code":"relay-starting"}"#), Answer::Starting));
+        assert!(matches!(answer(503, br#"{"error":"OpenCode Browser relay is starting","code":"relay-starting"}"#), Answer::Starting));
+        // Another program's 503 is foreign: it holds the port, so an unpinned relay moves on rather than waiting.
+        assert!(matches!(answer(503, br#"{"error":"unavailable"}"#), Answer::Other));
     }
 }
 

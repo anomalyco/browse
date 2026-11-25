@@ -73,9 +73,14 @@ describe("relay probe", () => {
   })
 
   test("recognizes browse's own answers and nothing else", () => {
-    expect(relayProbeResult(200, { version: "0.0.2", buildId: "x", instanceId: "abc", pid: 1 })).toBe("found")
+    const browse = { version: "0.0.2", buildId: "x", instanceId: "abc", startedAt: "2026-01-01T00:00:00.000Z", pid: 1, shutdownProtocol: 2 }
+    expect(relayProbeResult(200, browse)).toBe("found")
     expect(relayProbeResult(403, { error: "Cross-origin browser requests are not allowed" })).toBe("found")
     expect(relayProbeResult(403, { error: "Cross-origin browser requests are not allowed", installWaiting: true })).toBe("install-waiting")
+    // The reported Playwriter 0.12.0 reply, without an instanceId, and one that also carries one: neither is browse.
+    expect(relayProbeResult(200, { version: "0.12.0", pid: 75049, activeExecutes: 0 })).toBe("absent")
+    expect(relayProbeResult(200, { version: "0.12.0", pid: 75049, instanceId: "6f1c2a44-3b5d-4d6e-9a8f-0c1d2e3f4a5b", activeExecutes: 0 })).toBe("absent")
+    expect(relayProbeResult(200, { version: "0.12.0", instanceId: "6f1c2a44-3b5d-4d6e-9a8f-0c1d2e3f4a5b" })).toBe("absent")
     expect(relayProbeResult(200, { version: "1.0" })).toBe("absent")
     expect(relayProbeResult(404, undefined)).toBe("absent")
     expect(relayProbeResult(undefined, undefined)).toBe("absent")

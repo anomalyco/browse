@@ -82,7 +82,7 @@ describe("relay scan", () => {
       asked.push(String(input))
       const port = Number(/127\.0\.0\.1:(\d+)\/version/.exec(String(input))?.[1])
       return port === 19988 || port === 19992
-        ? Response.json({ version: "0.0.2", instanceId: "abc" })
+        ? Response.json({ version: "0.0.2", buildId: "build", instanceId: "abc", startedAt: "2026-01-01T00:00:00.000Z", shutdownProtocol: 2 })
         : new Response("not found", { status: 404 })
     }) as typeof fetch
     expect(await scanRelayPorts()).toEqual([19988, 19992])
