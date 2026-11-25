@@ -287,6 +287,11 @@ async fn run_async(ctx: ToolContext, tools: Arc<HashMap<String, Arc<dyn Tool>>>,
             if output.is_error {
                 return Err(if text.is_empty() { format!("{name} failed") } else { text });
             }
+            // A result cut to fit the agent's context (eval over its cap) would reach the script as broken JSON text
+            // with a marker inside: fail the call instead, so nothing is silently saved or used half.
+            if let Some(note) = output.structured_content.as_ref().and_then(|s| s.get("truncated")).and_then(Value::as_str) {
+                return Err(format!("{name}: {note} (a script gets the whole result or this error; for a large value, slice it in the page and call once per part)"));
+            }
             let images: Vec<Value> = output
                 .content
                 .iter()
