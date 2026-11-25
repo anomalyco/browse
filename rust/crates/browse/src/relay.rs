@@ -18,7 +18,7 @@ pub enum Probe {
 }
 
 /// What one `/version` answer means.
-enum Answer {
+pub(crate) enum Answer {
     Browse(Value),
     Starting,
     Other,
@@ -33,6 +33,13 @@ fn answer(status: u16, body: &[u8]) -> Answer {
     }
 }
 
+/// One open `/version` answer at `endpoint`, with transport errors left for the caller to judge. A stop keeps this
+/// apart from a complete reply: a relay that reset or stalled may still be shutting down, unlike one that answered.
+pub(crate) fn answer_at(endpoint: &str, timeout: Duration) -> Result<Answer, http::Error> {
+    let response = http::request(endpoint, "GET", "/version", &[], None, Some(timeout))?;
+    Ok(answer(response.status, &response.body))
+}
+
 pub fn probe() -> Probe {
     probe_at(&relay_api::endpoint())
 }
@@ -40,17 +47,15 @@ pub fn probe() -> Probe {
 /// What answers a relay's open `/version` at `endpoint`. A handover passes the endpoint `/shutdown` went to: resolving
 /// it again after the old relay deletes relay.json falls back to the default port, where another program may answer.
 pub fn probe_at(endpoint: &str) -> Probe {
-    match http::request(endpoint, "GET", "/version", &[], None, Some(Duration::from_secs(5))) {
+    match answer_at(endpoint, Duration::from_secs(5)) {
         Err(http::Error::Unreachable(_)) => Probe::Absent,
         Err(error) => Probe::Foreign(format!("{endpoint} didn't answer /version: {error}")),
-        Ok(response) => match answer(response.status, &response.body) {
-            Answer::Browse(version) => Probe::Running(version),
-            Answer::Starting => Probe::Absent,
-            Answer::Other => Probe::Foreign(format!(
-                "port {} is in use by another program, so the browse relay can't start there. Stop that program, or pick another port for browse with OPENCODE_BROWSER_PORT (set it where your agent starts, then restart the agent)",
-                endpoint.rsplit(':').next().unwrap_or("")
-            )),
-        },
+        Ok(Answer::Browse(version)) => Probe::Running(version),
+        Ok(Answer::Starting) => Probe::Absent,
+        Ok(Answer::Other) => Probe::Foreign(format!(
+            "port {} is in use by another program, so the browse relay can't start there. Stop that program, or pick another port for browse with OPENCODE_BROWSER_PORT (set it where your agent starts, then restart the agent)",
+            endpoint.rsplit(':').next().unwrap_or("")
+        )),
     }
 }
 
@@ -92,12 +97,20 @@ pub fn stop() -> anyhow::Result<bool> {
     }
     let instance = version.get("instanceId").and_then(Value::as_str).unwrap_or_default().to_owned();
     let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0 && *pid != std::process::id());
+    let endpoint = relay_api::endpoint();
+    // The bearer token goes only to the endpoint where this very instance answered an open /version just now. If it
+    // doesn't, this instance is already gone and there is nothing to stop.
+    if !matches!(probe_at(&endpoint), Probe::Running(current) if current.get("instanceId").and_then(Value::as_str) == Some(instance.as_str())) {
+        return Ok(false);
+    }
     let paths = relay_api::paths();
     let configured = browse_relay::port::configured_port();
     // The relay removes relay.json after its final tab write and shutdown log (serve.rs). While it still names this
     // instance, the files it writes as it exits may still come, so uninstall can't delete browse's folders yet.
     let recorded = browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance);
-    match send("POST", "/shutdown", &[], Some(b"{}"), Some(Duration::from_secs(10))) {
+    let auth = format!("Bearer {}", relay_api::token().unwrap_or_default());
+    let client_pid = std::process::id().to_string();
+    match http::request(&endpoint, "POST", "/shutdown", &[("Authorization", auth.as_str()), ("OpenCode-Browser-Client-Pid", client_pid.as_str())], Some(b"{}"), Some(Duration::from_secs(10))) {
         Ok(response) if (200..300).contains(&response.status) => {}
         // It stopped before answering: wait for it to finish with its files below.
         Err(http::Error::Unreachable(_)) => {}
@@ -106,7 +119,7 @@ pub fn stop() -> anyhow::Result<bool> {
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let answering = matches!(probe(), Probe::Running(v) if v.get("instanceId").and_then(Value::as_str) == Some(instance.as_str()));
+        let answering = matches!(probe_at(&endpoint), Probe::Running(v) if v.get("instanceId").and_then(Value::as_str) == Some(instance.as_str()));
         // relay.json is the relay's last write (serve.rs), so while it still names this instance the relay may still be
         // writing the tab registry and shutdown log. Without one, only its process going tells us it's done. A pid
         // reused by another process can hold the wait up, but only until the deadline below.

@@ -41,6 +41,17 @@ pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
     let body = body.to_string();
     let auth = format!("Bearer {}", relay_api::token().unwrap_or_default());
     let endpoint = relay_api::endpoint();
+    // The token goes only to the endpoint where this very instance answered an open /version just now. If it doesn't,
+    // this instance is already gone.
+    if !matches!(relay::probe_at(&endpoint), relay::Probe::Running(current) if current.get("instanceId").and_then(Value::as_str) == Some(instance)) {
+        return Ok(());
+    }
+    let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0 && *pid != std::process::id());
+    let paths = relay_api::paths();
+    let configured = browse_relay::port::configured_port();
+    // Relays after relay.json's introduction remove it after their final tab write and shutdown log; while it still
+    // names this instance the files they write as they exit may still come, so uninstall can't delete their folders yet.
+    let recorded = browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance);
     match http::request(&endpoint, "POST", "/shutdown", &[("Authorization", auth.as_str()), ("Content-Type", "application/json")], Some(body.as_bytes()), Some(Duration::from_secs(30))) {
         Ok(response) if (200..300).contains(&response.status) => {}
         // It went away on its own, or another process replaced it first.
@@ -61,13 +72,14 @@ pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    // The relay removes relay.json after its last write (cli/src/relay.ts cleanup): waiting for it to go means an
-    // uninstall that follows doesn't delete browse's folders under a relay that is still writing them.
-    let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok());
-    let paths = relay_api::paths();
-    let configured = browse_relay::port::configured_port();
-    while browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance) {
-        if pid.is_some_and(|pid| !browse_relay::process_alive(pid)) {
+    // The relay removes relay.json after its last write (cli/src/relay.ts cleanup), and relays 0.0.6-0.0.16 never wrote
+    // one: wait for the record when there is one, else for its pid, so an uninstall that follows doesn't delete
+    // browse's folders under a relay that is still writing them.
+    loop {
+        let writing = recorded && browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance);
+        let alive = pid.is_some_and(browse_relay::process_alive);
+        let waiting = if recorded { writing && (pid.is_none() || alive) } else { alive };
+        if !waiting {
             break;
         }
         if Instant::now() > deadline {
@@ -80,11 +92,19 @@ pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
 
 /// Whether the relay instance `instance` no longer answers at `endpoint`, the one `/shutdown` went to. Resolving the
 /// endpoint again would be wrong here: once the old relay deletes relay.json it falls back to the default port, where
-/// another program's server may answer. That is not this relay still running, so a non-browse answer means gone.
+/// another program's server may answer. Transport errors are kept apart too: a relay that reset the connection or
+/// stalled while shutting down is not gone yet, unlike one whose port nothing accepts any more.
 fn gone(endpoint: &str, instance: &str) -> bool {
-    match relay::probe_at(endpoint) {
-        relay::Probe::Running(version) => version.get("instanceId").and_then(Value::as_str) != Some(instance),
-        relay::Probe::Absent | relay::Probe::Foreign(_) => true,
+    match relay::answer_at(endpoint, Duration::from_secs(5)) {
+        // Nothing accepted the connection: the relay left the port.
+        Err(http::Error::Unreachable(_)) => true,
+        // It accepted but reset, stalled past the timeout or sent something unreadable: it may still be exiting.
+        Err(http::Error::Io(_)) => false,
+        // A complete answer that isn't a browse relay: something else holds the port now.
+        Ok(relay::Answer::Other) => true,
+        // A browse relay that is starting has not proved this instance left.
+        Ok(relay::Answer::Starting) => false,
+        Ok(relay::Answer::Browse(version)) => version.get("instanceId").and_then(Value::as_str) != Some(instance),
     }
 }
 
@@ -123,7 +143,17 @@ mod tests {
     const FOREIGN: &str = r#"{"version":"0.12.0","pid":75049,"activeExecutes":0}"#;
     const LEGACY: &str = r#"{"version":"0.0.17","buildId":"3f2a1c9d","instanceId":"legacy-instance","startedAt":"2026-11-01T12:00:00.000Z","pid":4242,"managed":true,"shutdownProtocol":2}"#;
 
-    /// One HTTP server on a free loopback port (never 19988–19997), answering every request with `body` until stopped.
+    /// What a [`FakeServer`] does after accepting and reading a request.
+    #[derive(Clone, Copy)]
+    enum Reply {
+        Body(&'static str),
+        /// Hold the connection open without answering; the client's read timeout is the answer.
+        Silent,
+        /// Close the connection without answering.
+        Close,
+    }
+
+    /// One HTTP server on a free loopback port (never 19988–19997), handling every request with `reply` until stopped.
     struct FakeServer {
         endpoint: String,
         stop: Arc<AtomicBool>,
@@ -132,6 +162,18 @@ mod tests {
 
     impl FakeServer {
         fn start(body: &'static str) -> Self {
+            Self::serve(Reply::Body(body))
+        }
+
+        fn silent() -> Self {
+            Self::serve(Reply::Silent)
+        }
+
+        fn closing() -> Self {
+            Self::serve(Reply::Close)
+        }
+
+        fn serve(reply: Reply) -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             listener.set_nonblocking(true).unwrap();
             let endpoint = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -143,11 +185,21 @@ mod tests {
                         Ok((mut stream, _)) => {
                             let mut request = [0u8; 2048];
                             let _ = stream.read(&mut request);
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                                body.len()
-                            );
-                            let _ = stream.write_all(response.as_bytes());
+                            match reply {
+                                Reply::Body(body) => {
+                                    let response = format!(
+                                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                        body.len()
+                                    );
+                                    let _ = stream.write_all(response.as_bytes());
+                                }
+                                // Holding the stream here leaves the client waiting for its read timeout.
+                                Reply::Silent => while !stopping.load(Ordering::SeqCst) {
+                                    std::thread::sleep(Duration::from_millis(10));
+                                },
+                                // Dropping the stream without writing closes the connection.
+                                Reply::Close => {}
+                            }
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
                         Err(_) => break,
@@ -190,5 +242,21 @@ mod tests {
         assert!(gone(&legacy.endpoint, "legacy-instance"));
         // A non-browse answer at that endpoint means it left the port too, not that it is still running.
         assert!(gone(&foreign.endpoint, "legacy-instance"));
+    }
+
+    /// A relay still shutting down may accept the connection and stall. That is not proof it is gone, or a stop would
+    /// report a relay that is still writing its files as finished.
+    #[test]
+    fn a_relay_that_stalls_is_not_gone_while_it_may_still_be_stopping() {
+        // The 5s /version read timeout is the point of this case, so the test takes that long.
+        let stalling = FakeServer::silent();
+        assert!(!gone(&stalling.endpoint, "legacy-instance"));
+    }
+
+    /// A relay closing its listener as it exits can reset the probe's connection. That too is not proof it is gone.
+    #[test]
+    fn a_relay_that_closes_the_connection_is_not_gone_while_it_may_still_be_stopping() {
+        let closing = FakeServer::closing();
+        assert!(!gone(&closing.endpoint, "legacy-instance"));
     }
 }
