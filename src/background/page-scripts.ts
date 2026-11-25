@@ -29,9 +29,21 @@ export async function send(tabId: number, message: object) {
   }
 }
 
+/** Tabs whose page still has a status agents depend on, even when the debugger isn't attached to them. */
+let busy: (tabId: number) => boolean = () => false
+
+/**
+ * Tabs with a status agents wait on keep the script after a navigation even without a debugger: another extension's
+ * frame can detach it while the relay keeps the tab, and a handoff waiting there must show its card again on the next
+ * page.
+ */
+export function keepWhileBusy(check: (tabId: number) => boolean) {
+  busy = check
+}
+
 // A navigation starts a new document without the script. "loading" can still be the old document, so inject on
 // "complete" too.
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.status !== "loading" && change.status !== "complete") return
-  if (DebuggerHub.attachedTabs().includes(tabId)) void inject(tabId)
+  if (DebuggerHub.attachedTabs().includes(tabId) || busy(tabId)) void inject(tabId)
 })

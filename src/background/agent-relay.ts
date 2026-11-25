@@ -48,6 +48,7 @@ import { installPopupAdoption } from "./agent-relay/popups"
 import { DebuggerHub } from "./debugger-hub"
 import { DebuggingBarNotice } from "./debugging-bar-notice"
 import { HandoffNotice } from "./handoff-notice"
+import { PageScripts } from "./page-scripts"
 import { TabCleanup } from "./tab-cleanup"
 import { ToolbarNotice } from "./toolbar-notice"
 
@@ -580,10 +581,12 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   chrome.runtime.onStartup.addListener(grouping.onBrowserStartup)
   chrome.tabs.onDetached.addListener(() => grouping.recountShared())
   // Never close a tab while its agent runs a script on it, waits for the user there, or records it.
-  TabCleanup.guard((tabId) => {
+  const busy = (tabId: number) => {
     const state = pageStatuses.get(tabId)?.state
     return state === "waiting" || state === "running"
-  })
+  }
+  TabCleanup.guard(busy)
+  PageScripts.keepWhileBusy(busy)
   AgentGroups.keepOpenWhile((tabId) => pageStatuses.get(tabId)?.state === "waiting")
   const tabRemoved = (tabId: number) => {
     canceledAgentTabs.delete(tabId)
@@ -691,13 +694,15 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       if (!isJsonObject(message)) return undefined
       const tabId = sender.tab?.id
       if (message.action === "page-status.ready") {
-        if (typeof tabId === "number" && relayTabs.has(tabId)) {
+        if (typeof tabId === "number") {
+          // A tab whose debugger another extension's frame detached (the relay keeps it) still waits for its status;
+          // only a tab the extension still holds is asked for one.
           const page = pageStatuses.get(tabId)
           if (page)
             void chrome.tabs
               .sendMessage(tabId, { action: "page-status.set", status: HandoffNotice.forPage(tabId, page) })
               .catch(() => undefined)
-          send({ method: "pageStatus.requested", params: { tabId } })
+          if (relayTabs.has(tabId)) send({ method: "pageStatus.requested", params: { tabId } })
         }
         return false
       }
