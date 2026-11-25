@@ -139,19 +139,6 @@ impl TabDriver for FakeTab {
                 other => Ok(Ok(Evaluated::Json(json!(other)))),
             };
         }
-        if expression.contains("browse-pick:install") {
-            return Ok(Ok(Evaluated::Json(json!("doc-1"))));
-        }
-        if expression.contains("browse-pick:remove") {
-            return Ok(Ok(Evaluated::Json(json!(true))));
-        }
-        if expression.contains("browse-pick:take") {
-            if !expression.ends_with(", 0)") {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            let element = json!({ "selector": "button.save", "tag": "button", "role": "button", "name": "Save", "matches": 1, "note": "smaller" });
-            return Ok(Ok(Evaluated::Json(json!({ "doc": "doc-1", "version": 1, "note": "all of them", "elements": [element] }))));
-        }
         if expression.contains("document.title") {
             return Ok(Ok(Evaluated::Json(json!([self.url.lock().unwrap().clone(), "Fake title"]))));
         }
@@ -650,39 +637,6 @@ async fn a_direct_handoff_redraws_after_a_stale_evaluate_and_holds_agent_input()
     eventually("the card to be taken down", || watched.evaluated("browse-handoff:remove") >= 1).await;
     driver.pointer(press()).await.unwrap();
     assert_eq!(page.pointers.load(Ordering::SeqCst), 1);
-}
-
-/// `pick` in a direct tab: the picker goes in before the handoff card, the card's Continue ends it, and the picks
-/// come back numbered with their notes once both are taken down.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_direct_pick_installs_the_picker_and_continues_through_the_card() {
-    let h = harness().await;
-    let relay = h.handle.relay.clone();
-    let fake = FakeBrowser::new();
-    register(&relay, &fake).await;
-    let browser = h.handle.browser();
-    let info = browser.open_tab(Some("https://example.com/"), &TabOptions::default()).await.unwrap();
-    let page = fake.tab(&fake.opened()[0]);
-    let picking = relay.clone();
-    let pick = tokio::spawn(async move { crate::pick::pick(&picking, info.tab, "Click what to change", Duration::from_secs(30)).await });
-    let watched = page.clone();
-    eventually("the card to be drawn", || watched.evaluated("browse-handoff:install") >= 1).await;
-    {
-        let evaluations = page.evaluations.lock().unwrap();
-        let first = |marker: &str| evaluations.iter().position(|e| e.contains(marker)).unwrap();
-        assert!(first("browse-pick:install") < first("browse-handoff:install"), "the picker is in place before the card");
-    }
-    assert!(relay.st().handoff_for_tab(info.tab).is_some());
-
-    *page.default_wait.lock().unwrap() = "continue";
-    let result = tokio::time::timeout(Duration::from_secs(10), pick).await.unwrap().unwrap().unwrap();
-    assert_eq!(result["outcome"], "continued");
-    assert_eq!(result["elements"][0]["index"], 1);
-    assert_eq!(result["elements"][0]["selector"], "button.save");
-    assert_eq!(result["note"], "all of them");
-    assert_eq!(result["summary"][0], "1. button \"Save\" (button.save): smaller");
-    assert!(relay.st().handoff_for_tab(info.tab).is_none());
-    assert!(page.evaluated("browse-pick:remove") >= 1, "the overlay is taken down");
 }
 
 #[tokio::test]

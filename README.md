@@ -251,7 +251,6 @@ OpenCode, which composes tools in code mode, gets the plain tools. Every other M
 | `emulate`, `webmcp` | Viewport, color scheme, user agent, geolocation and more; tools a page offers through WebMCP |
 | `tabs` | List, open or close tabs (`group` closes a whole group; an `id` names a tab for good, and opens it if it's missing) |
 | `handoff`, `demonstrate` | Ask you to do something only a person can do; ask you to show a flow while it records your steps |
-| `pick` | Ask you to click the elements you mean, with a note for each, and get each one back with a selector and a short summary |
 | `settings`, `status` | Read or change your settings when you ask; the relay, browsers, pairing state and what to do next |
 | `execute` | For other clients: JavaScript with a Playwright-style `page`, `snapshot()`, `ref()`, `handoff()`, `state` and `browse.<tool>()`. Each result starts with the tab it ended in, to pass back as `tab` |
 
