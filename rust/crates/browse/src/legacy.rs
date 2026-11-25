@@ -45,7 +45,7 @@ pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
         Ok(response) if (200..300).contains(&response.status) => {}
         // It went away on its own, or another process replaced it first.
         Err(http::Error::Unreachable(_)) => {}
-        Ok(response) if response.status == 409 && gone(instance) => {}
+        Ok(response) if response.status == 409 && gone(&endpoint, instance) => {}
         Ok(response) => {
             let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
             let message = value.get("error").and_then(|e| e.get("message").or(Some(e))).and_then(Value::as_str).map(str::to_owned);
@@ -55,7 +55,7 @@ pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
         Err(error) => bail!("the older browse relay ({running}) didn't stop for browse {VERSION}: {error}"),
     }
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !gone(instance) {
+    while !gone(&endpoint, instance) {
         if Instant::now() > deadline {
             bail!("the older browse relay ({running}) accepted the shutdown but is still running");
         }
@@ -78,12 +78,13 @@ pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether the relay instance `instance` no longer answers.
-fn gone(instance: &str) -> bool {
-    match relay::probe() {
+/// Whether the relay instance `instance` no longer answers at `endpoint`, the one `/shutdown` went to. Resolving the
+/// endpoint again would be wrong here: once the old relay deletes relay.json it falls back to the default port, where
+/// another program's server may answer. That is not this relay still running, so a non-browse answer means gone.
+fn gone(endpoint: &str, instance: &str) -> bool {
+    match relay::probe_at(endpoint) {
         relay::Probe::Running(version) => version.get("instanceId").and_then(Value::as_str) != Some(instance),
-        relay::Probe::Absent => true,
-        relay::Probe::Foreign(_) => false,
+        relay::Probe::Absent | relay::Probe::Foreign(_) => true,
     }
 }
 
@@ -107,4 +108,87 @@ pub fn runtime_switch(args: &[String]) -> anyhow::Result<i32> {
     relay::ensure()?;
     println!("browse relay switched to {VERSION}");
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    /// The reply the issue reporter captured (Playwriter 0.12.0, no instanceId) and a legacy browse relay's answer.
+    const FOREIGN: &str = r#"{"version":"0.12.0","pid":75049,"activeExecutes":0}"#;
+    const LEGACY: &str = r#"{"version":"0.0.17","buildId":"3f2a1c9d","instanceId":"legacy-instance","startedAt":"2026-11-01T12:00:00.000Z","pid":4242,"managed":true,"shutdownProtocol":2}"#;
+
+    /// One HTTP server on a free loopback port (never 19988–19997), answering every request with `body` until stopped.
+    struct FakeServer {
+        endpoint: String,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeServer {
+        fn start(body: &'static str) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopping = stop.clone();
+            let thread = std::thread::spawn(move || {
+                while !stopping.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let mut request = [0u8; 2048];
+                            let _ = stream.read(&mut request);
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self { endpoint, stop, thread: Some(thread) }
+        }
+
+        fn stop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    impl Drop for FakeServer {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    /// A foreign reply on another port must not make the legacy relay at the endpoint `/shutdown` went to look running.
+    /// `gone` used to probe `relay::probe()`, which re-resolved the endpoint: once the old relay deleted relay.json that
+    /// fell back to the default port, where Playwriter answered, and the foreign reply counted as alive until the
+    /// deadline. The legacy relay had left its own port long before.
+    #[test]
+    fn a_foreign_reply_on_another_port_does_not_keep_a_stopped_legacy_relay_alive() {
+        let foreign = FakeServer::start(FOREIGN);
+        let mut legacy = FakeServer::start(LEGACY);
+        assert!(matches!(
+            relay::probe_at(&legacy.endpoint),
+            relay::Probe::Running(version) if version["instanceId"].as_str() == Some("legacy-instance")
+        ));
+        // What re-resolving the endpoint would find after relay.json goes: another program's server.
+        assert!(matches!(relay::probe_at(&foreign.endpoint), relay::Probe::Foreign(_)));
+        legacy.stop();
+        // The relay no longer answers at the endpoint /shutdown went to, whatever the other port says.
+        assert!(gone(&legacy.endpoint, "legacy-instance"));
+        // A non-browse answer at that endpoint means it left the port too, not that it is still running.
+        assert!(gone(&foreign.endpoint, "legacy-instance"));
+    }
 }

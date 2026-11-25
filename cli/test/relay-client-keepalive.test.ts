@@ -25,7 +25,7 @@ async function fakeRelay() {
   let connections = 0
   const server = http.createServer((_request, response) => {
     response.setHeader("content-type", "application/json; charset=utf-8")
-    response.end(JSON.stringify({ version: "0.1.5", instanceId: "keepalive-relay" }))
+    response.end(JSON.stringify({ version: "0.1.5", buildId: "keepalive-build", instanceId: "keepalive-relay", startedAt: "2026-01-01T00:00:00.000Z", shutdownProtocol: 2 }))
   })
   // Hold idle connections open: only a keep-alive client reuses one, and the server never closes it between requests.
   server.keepAliveTimeout = 0

@@ -114,7 +114,7 @@ test.skipIf(legacyHost)("uninstall keeps polling while the stopping relay resets
       request.socket.destroy()
       return
     }
-    response.end(JSON.stringify({ version: "0.0.0", instanceId, managed: true, shutdownProtocol: 2 }))
+    response.end(JSON.stringify({ version: "0.0.0", buildId: "stopping-build", instanceId, startedAt: "2026-01-01T00:00:00.000Z", managed: true, shutdownProtocol: 2 }))
   })
   await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve))
   const port = (relay.address() as AddressInfo).port
