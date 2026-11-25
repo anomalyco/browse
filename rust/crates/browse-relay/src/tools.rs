@@ -1,4 +1,4 @@
-//! The relay's own tools: tabs, handoff, demonstrate, status and settings.
+//! The relay's own tools: tabs, handoff, demonstrate, pick, status and settings.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -308,6 +308,30 @@ impl Tool for DemonstrateTool {
     }
 }
 
+struct PickTool;
+
+#[async_trait]
+impl Tool for PickTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "pick".into(),
+            description: "Ask the user to point at elements in a tab: they click one or more elements (clicks pick instead of acting on the page), add a note to each and click Continue. Use it when the user wants you to work on something on the page and describing it is unclear. Returns `elements` in the order picked (`index`, a `selector` to reuse in page tools, `matches` (1 when unique), tag, role, name, attributes, text, html, box, a few computed styles and the user's `note`; values of sensitive fields are left out), `note` for all of them, and `summary` (one line each). Elements inside iframes can't be picked.".into(),
+            input_schema: handoff_schema("What the user should pick, e.g. \"Click the parts of the page you want changed, add a note to each, then click Continue.\""),
+            output_schema: Some(browse_core::output_schema(json!({ "outcome": { "type": "string" }, "elements": { "type": "array" }, "summary": { "type": "array" }, "note": { "type": "string" } }), &["outcome"])),
+        }
+    }
+
+    async fn call(&self, _ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput> {
+        let relay = relay()?;
+        let message = string(&args, "message").unwrap_or_default();
+        let timeout = handoff_timeout(&args)?;
+        let tab = handoff_tab(&relay, &args).await?;
+        let result = crate::pick::pick(&relay, tab, &message, timeout).await?;
+        let failed = result["outcome"] != "continued";
+        Ok(ToolOutput { is_error: failed, ..json_output(result) })
+    }
+}
+
 struct StatusTool;
 
 #[async_trait]
@@ -413,6 +437,7 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(TabsTool),
         Arc::new(HandoffTool),
         Arc::new(DemonstrateTool),
+        Arc::new(PickTool),
         Arc::new(SettingsTool),
     ]
 }

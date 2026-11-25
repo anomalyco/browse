@@ -722,7 +722,7 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     if output.is_error {
         let text: String = output.content.iter().filter_map(|c| if let Content::Text { text } = c { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join(" ");
         // A handoff the user didn't finish (timeout, closed, cancelled) is an outcome, not a failure.
-        let outcome = matches!(name.as_str(), "handoff" | "demonstrate")
+        let outcome = matches!(name.as_str(), "handoff" | "demonstrate" | "pick")
             .then(|| serde_json::from_str::<Value>(&text).ok())
             .flatten()
             .and_then(|v| v["outcome"].as_str().map(str::to_string));

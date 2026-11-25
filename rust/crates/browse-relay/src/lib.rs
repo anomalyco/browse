@@ -27,6 +27,7 @@ mod extension;
 mod handoff_card;
 mod handshake;
 mod link;
+mod pick;
 mod presentation;
 mod relay;
 mod serve;
