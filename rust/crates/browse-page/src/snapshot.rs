@@ -398,7 +398,8 @@ fn table_header(lines: &[String], index: usize) -> Option<usize> {
     }
     let depth = indent(line);
     let table = (0..index).rev().find(|&i| indent(&lines[i]) < depth)?;
-    if !lines[table].trim_start().starts_with("- table ") {
+    let table_line = lines[table].trim_start();
+    if table_line != "- table" && !table_line.starts_with("- table ") {
         return None;
     }
     let first = table + 1;
@@ -1196,7 +1197,7 @@ mod tests {
         let table = |wins: &str| {
             vec![
                 entry("- heading \"Teams\""),
-                entry("- table \"Table\""),
+                entry("- table"),
                 entry("  - row \"Team | Wins\""),
                 entry("  - row \"Islanders | 25\""),
                 entry(&format!("  - row \"Rangers | {wins}\"")),
