@@ -206,6 +206,10 @@ fn fake_extension_with_urls(socket: Socket, next_tab: i64, urls: TargetUrls) -> 
                         let _ = replies.send(json!({ "id": id, "error": "Cannot attach to this target." }));
                         continue;
                     }
+                    "Page.navigate" if params["params"]["url"] == "https://blocked.example/page" => {
+                        let _ = replies.send(json!({ "id": id, "error": format!("{}https://blocked.example/page", crate::relay::NAVIGATE_DETACHED) }));
+                        continue;
+                    }
                     "Protected.method" => {
                         let _ = replies.send(json!({ "id": id, "error": "Cannot access a chrome-extension:// URL of different extension" }));
                         continue;
@@ -1332,6 +1336,20 @@ async fn a_tab_stuck_on_an_error_page_says_so() {
     let cdp = browser.cdp(tab).await.unwrap();
     let error = cdp.send("Unattachable.method", json!({}), None).await.unwrap_err();
     assert!(error.to_string().contains("stuck on a Chrome error page") && error.to_string().contains("navigate"), "{error}");
+    assert!(browser.cdp(tab).await.is_ok(), "the tab stays the agent's");
+}
+
+#[tokio::test]
+async fn a_navigation_that_detaches_the_debugger_says_where_the_tab_is() {
+    let (h, _seen, _events) = connected("profile-nav-detached", 185).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let tab = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let cdp = browser.cdp(tab).await.unwrap();
+    let error = cdp.send("Page.navigate", json!({ "url": "https://blocked.example/page" }), None).await.unwrap_err().to_string();
+    assert!(error.contains("blocked the page") && error.contains("https://blocked.example/page"), "{error}");
+    assert!(!error.contains("Detached while handling command"), "{error}");
+    assert_eq!(relay.st().tabs.get(&tab).map(|t| t.url.clone()).as_deref(), Some("https://blocked.example/page"), "the tab list shows where the tab is");
     assert!(browser.cdp(tab).await.is_ok(), "the tab stays the agent's");
 }
 

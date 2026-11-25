@@ -238,3 +238,38 @@ test("Page.navigate to about:blank with a fragment is sent as about:blank; other
     debuggerApi.sendCommand = realSend
   }
 })
+
+test("Page.navigate that detaches the debugger reports where the tab is, or the detach when the tab is gone", async () => {
+  const debuggerApi = (stub.chrome as unknown as {
+    debugger: { sendCommand: (debuggee: unknown, method: string, params?: unknown) => Promise<unknown> }
+  }).debugger
+  const realSend = debuggerApi.sendCommand
+  let navigates = 0
+  debuggerApi.sendCommand = async (_debuggee, method) => {
+    if (method !== "Page.navigate") return {}
+    navigates++
+    throw new Error("Detached while handling command.")
+  }
+  const { createRelayDebugger } = await import("../../src/background/agent-relay/debugger")
+  const { createAgentRelayLog } = await import("../../src/background/agent-relay/log")
+  const { NAVIGATE_DETACHED } = await import("../../src/background/agent-relay/wire")
+  const debuggerOps = createRelayDebugger({
+    log: createAgentRelayLog(),
+    relayTabs: new Set<number>(),
+    notify: () => {},
+    forget: () => {},
+    send: () => {},
+  })
+  const tab = await stub.chrome.tabs.create({ url: "https://blocked.example/page" })
+  try {
+    const kept = await debuggerOps.sendCommand({ tabId: tab.id!, method: "Page.navigate", params: { url: "https://blocked.example/page" } }).catch((error: Error) => error)
+    expect((kept as Error).message).toBe(`${NAVIGATE_DETACHED}https://blocked.example/page`)
+    expect(navigates).toBe(1)
+
+    await stub.chrome.tabs.remove(tab.id!)
+    const gone = await debuggerOps.sendCommand({ tabId: tab.id!, method: "Page.navigate", params: { url: "https://blocked.example/page" } }).catch((error: Error) => error)
+    expect((gone as Error).message).toBe("Detached while handling command.")
+  } finally {
+    debuggerApi.sendCommand = realSend
+  }
+})

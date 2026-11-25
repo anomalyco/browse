@@ -125,7 +125,8 @@ async fn refresh_titles(relay: &Arc<Relay>) {
         if let Ok(result) = result
             && let Some(entry) = relay.st().tabs.get_mut(&tab)
         {
-            if let Some(url) = result["targetInfo"]["url"].as_str() {
+            // A tab on another extension's page reports no url; keep the one browse last knew.
+            if let Some(url) = result["targetInfo"]["url"].as_str().filter(|url| !url.is_empty()) {
                 entry.url = url.to_string();
             }
             if let Some(title) = result["targetInfo"]["title"].as_str() {

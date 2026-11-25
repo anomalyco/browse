@@ -1,6 +1,6 @@
 import { isJsonObject, type JsonObject } from "../../agent-relay/protocol"
 import { DebuggerHub } from "../debugger-hub"
-import { FOREIGN_FRAME, number, sleep, string, text, type AgentRelayLog } from "./wire"
+import { DETACHED_COMMAND, FOREIGN_FRAME, NAVIGATE_DETACHED, number, sleep, string, text, type AgentRelayLog } from "./wire"
 
 // about:blank with a fragment crashes Chrome and Vivaldi when navigated through CDP; the fragment means nothing on
 // about:blank, so send plain about:blank instead. The current page isn't checked, and url spelling varies.
@@ -47,6 +47,16 @@ export function createRelayDebugger(deps: {
     if (removed) deps.log.add("evict", { tabId, removed })
   }
 
+  /** The tab outlived the detach: attach again and say where it ended up, instead of reporting it closed. */
+  const navigateDetached = async (tabId: number, error: unknown): Promise<never> => {
+    if (!(await chrome.tabs.get(tabId).catch(() => undefined))) throw error
+    const reattached = await reattach(tabId)
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+    if (!tab) throw error
+    deps.log.add("cdp.navigateDetached", { tabId, reattached, status: tab.status ?? "" })
+    throw new Error(`${NAVIGATE_DETACHED}${tab.pendingUrl ?? tab.url ?? ""}`)
+  }
+
   const sendCommand = async (params: JsonObject | undefined): Promise<JsonObject> => {
     const tabId = number(params, "tabId")
     const method = string(params, "method")
@@ -62,6 +72,7 @@ export function createRelayDebugger(deps: {
     try {
       return await call()
     } catch (error) {
+      if (sessionId === undefined && navigateUrl !== undefined && DETACHED_COMMAND.test(text(error))) return navigateDetached(tabId, error)
       if (!FOREIGN_FRAME.test(text(error))) throw error
       for (let attempt = 0; attempt < 2; attempt++) {
         deps.log.add("cdp.recover", { tabId, cdp: method, attempt, error: text(error) })

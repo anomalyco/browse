@@ -781,6 +781,14 @@ impl Relay {
         };
         match &result {
             Err(RpcError::Remote(message)) if missing_tab(message) => self.me().forget_missing_tab(tab, method),
+            Err(RpcError::Remote(message)) if message.starts_with(NAVIGATE_DETACHED) => {
+                let url = message[NAVIGATE_DETACHED.len()..].to_string();
+                if !url.is_empty()
+                    && let Some(entry) = self.st().tabs.get_mut(&tab) {
+                        entry.url = url.clone();
+                    }
+                return Err(RpcError::Remote(navigate_detached_message(&url)));
+            }
             Err(RpcError::Remote(message))
                 if protected_ui_error(message) || (message.contains("not attached") && self.st().tabs.get(&tab).is_some_and(|t| t.protected_ui)) =>
             {
@@ -932,6 +940,17 @@ pub fn unattachable_message(tab: i64, url: &str) -> String {
     let page = if url.is_empty() { String::new() } else { format!(" ({})", crate::util::short_url(url)) };
     format!(
         "Tab {tab} is stuck on a Chrome error page{page}: its last load failed (blocked by the browser or another extension), and Chrome doesn't let browse into that page. Close it with the tabs tool and open another with navigate (without tab). A tab the user lent has to be navigated by the user."
+    )
+}
+
+/// The extension's answer when Chrome dropped the debugger mid Page.navigate but the tab is still there, followed by the
+/// tab's url (NAVIGATE_DETACHED in the extension's wire.ts).
+pub const NAVIGATE_DETACHED: &str = "Navigation detached the debugger; the tab is at ";
+
+pub fn navigate_detached_message(url: &str) -> String {
+    let page = if url.is_empty() { String::new() } else { format!(", leaving it at {}", crate::util::short_url(url)) };
+    format!(
+        "Chrome detached browse from the tab while it navigated{page}: another extension or Chrome itself probably blocked the page (an extension's block page or a Chrome error page). Try another URL, or ask the user what blocks this one."
     )
 }
 
