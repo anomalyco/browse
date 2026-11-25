@@ -38,7 +38,8 @@ impl Browser for FakeBrowser {
     }
 }
 
-/// `echo` returns its arguments, `fail` fails with `message`, `picture` returns an image, `handoff` waits `ms`.
+/// `echo` returns its arguments, `fail` fails with `message`, `picture` returns an image, `handoff` waits `ms`, `cut`
+/// returns a result cut to fit like an oversized eval's.
 struct Fake(&'static str);
 
 #[async_trait]
@@ -55,6 +56,7 @@ impl Tool for Fake {
             "navigate" => ToolOutput::text(json!({ "tab": args.get("tab").cloned().unwrap_or(json!(7)), "url": args["url"], "title": "T", "status": 200, "navigated": true }).to_string()),
             // Echo the upload args so a test can see what setInputFiles hands the tool.
             "upload" => ToolOutput::text(args.to_string()),
+            "cut" => ToolOutput { structured_content: Some(json!({ "value": null, "truncated": "the result is 300002 characters" })), ..ToolOutput::text("\"xxxx\n… [truncated: the result is 300002 characters]") },
             "handoff" => {
                 tokio::time::sleep(Duration::from_millis(args["ms"].as_u64().unwrap_or(0))).await;
                 ToolOutput::text(json!({ "outcome": "continued" }).to_string())
@@ -69,7 +71,7 @@ fn context() -> ToolContext {
 }
 
 fn execute() -> Arc<dyn Tool> {
-    let fakes: Vec<Arc<dyn Tool>> = ["echo", "fail", "picture", "navigate", "handoff", "upload"].into_iter().map(|n| Arc::new(Fake(n)) as Arc<dyn Tool>).collect();
+    let fakes: Vec<Arc<dyn Tool>> = ["echo", "fail", "picture", "navigate", "handoff", "upload", "cut"].into_iter().map(|n| Arc::new(Fake(n)) as Arc<dyn Tool>).collect();
     crate::tools(&fakes).remove(0)
 }
 
@@ -122,6 +124,9 @@ async fn tools_and_errors() {
     assert_eq!(ok("page.url()").await, "about:blank", "a page without a tab is blank");
     let fetched = err("await fetch('https://example.com')").await;
     assert!(fetched.contains("page.evaluate"), "{fetched}");
+    // A result cut to fit (eval over its cap) fails the call instead of handing the script the cut JSON text.
+    let cut = err("const r = await browse.cut({}); return r.length").await;
+    assert!(cut.contains("cut: the result is 300002 characters") && cut.contains("call once per part"), "{cut}");
 }
 
 #[tokio::test]
