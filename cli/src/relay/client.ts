@@ -222,10 +222,30 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
       }),
     )
 
+  /**
+   * The socket failure's code (ECONNRESET, EPIPE, ...) from the Effect error's cause chain, so a transport failure can
+   * name what happened instead of reading only like a relay that isn't there.
+   */
+  const transportCauseCode = (cause: unknown): string | undefined => {
+    const seen = new Set<unknown>()
+    let current = cause
+    while (typeof current === "object" && current !== null && !seen.has(current)) {
+      seen.add(current)
+      const failure = current as { readonly code?: unknown; readonly cause?: unknown }
+      if (typeof failure.code === "string") return failure.code
+      current = failure.cause
+    }
+    return undefined
+  }
+
   const transportError = (path: string, at?: string) => (cause: unknown) => {
     const endpoint = at ?? currentEndpoint()
+    const code = transportCauseCode(cause)
+    const unreachable = `browse relay is not reachable at ${endpoint}. Relay-backed CLI commands start it automatically; use \`${cliCommand("serve")}\` only for foreground debugging.`
     return new RelayUnreachable({
-      message: `browse relay is not reachable at ${endpoint}. Relay-backed CLI commands start it automatically; use \`${cliCommand("serve")}\` only for foreground debugging.`,
+      // A refusal is the ordinary "no relay yet" answer and keeps its message; any other transport failure names its
+      // code, so a reset is distinguishable from a relay that isn't running.
+      message: code === undefined || code === "ECONNREFUSED" ? unreachable : `${unreachable} (${code})`,
       endpoint,
       path,
       cause,
@@ -534,8 +554,19 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
 
 const layer: Layer.Layer<Service, RelayConfigInvalid, HttpClient.HttpClient> = Layer.effect(Service, make())
 
+/**
+ * The relay's `node:http` client with one keep-alive agent, shared by the CLI, the MCP server and the opencode library
+ * client. The agent `NodeHttpClient.layerNodeHttp` creates with default options (no keep-alive) sends
+ * `Connection: close`, so the relay closes the socket right after writing each response; on Windows under Bun reading
+ * that response can surface as `read ECONNRESET`. With keep-alive the relay keeps the connection open between
+ * requests. Node and Bun unref idle keep-alive sockets, so a one-shot CLI command still exits when its work is done.
+ */
+export const relayHttpClient: Layer.Layer<HttpClient.HttpClient> = NodeHttpClient.layerNodeHttpNoAgent.pipe(
+  Layer.provide(NodeHttpClient.layerAgentOptions({ keepAlive: true })),
+)
+
 /** RelayClient backed by `node:http` (avoiding undici's 5-minute headersTimeout on long handoffs/commands), for standalone CLI/MCP wiring. */
-export const layerFetch: Layer.Layer<Service, RelayConfigInvalid> = layer.pipe(Layer.provide(NodeHttpClient.layerNodeHttp))
+export const layerFetch: Layer.Layer<Service, RelayConfigInvalid> = layer.pipe(Layer.provide(relayHttpClient))
 
 /**
  * The process the relay watches for this MCP server: an older install's supervisor when it started this server
@@ -548,5 +579,5 @@ function mcpClientPid(): number {
 
 /** layerFetch for the MCP server, which names its process to the relay (see `make`). */
 export const layerFetchMcp: Layer.Layer<Service, RelayConfigInvalid> = Layer.effect(Service, make({ clientPid: mcpClientPid() })).pipe(
-  Layer.provide(NodeHttpClient.layerNodeHttp),
+  Layer.provide(relayHttpClient),
 )

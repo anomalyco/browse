@@ -1,4 +1,3 @@
-import { NodeHttpClient } from "@effect/platform-node"
 import { Context, Effect, Layer, Match, Redacted, Schema } from "effect"
 import * as AuthenticatedOriginInternal from "./auth/authenticated-origin.ts"
 import * as RelayClient from "./relay/client.ts"
@@ -181,7 +180,7 @@ export class Service extends Context.Service<Service, Interface>()(
 
 export const make = Effect.fn("OpenCodeBrowserClient.make")(function* (options: MakeOptions = {}) {
   const relay = yield* RelayClient.make(options).pipe(
-    Effect.provide(NodeHttpClient.layerNodeHttp),
+    Effect.provide(RelayClient.relayHttpClient),
     Effect.mapError((error) => clientError("connect", error)),
   )
   const readiness = yield* RelayLifecycle.ensureRelay({
