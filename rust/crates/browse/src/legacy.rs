@@ -20,9 +20,9 @@ fn id() -> String {
     format!("{:016x}{:016x}", session::random_u64(), session::random_u64())
 }
 
-/// Asks the legacy relay `version` describes to stop, and waits until it has. `force` ends a capture, recording or raw
-/// CDP client that would otherwise make it refuse.
-pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
+/// Asks the legacy relay `version` describes to stop at `endpoint`, the one it answered its open `/version` on, and
+/// waits until it has. `force` ends a capture, recording or raw CDP client that would otherwise make it refuse.
+pub fn stop(endpoint: &str, version: &Value, force: bool) -> anyhow::Result<()> {
     let running = version.get("version").and_then(Value::as_str).unwrap_or("unknown");
     // relay::probe only reports a relay whose /version has browse's fields, instanceId among them.
     let instance = version.get("instanceId").and_then(Value::as_str).unwrap_or_default();
@@ -39,24 +39,18 @@ pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
         body["force"] = json!(true);
     }
     let body = body.to_string();
-    let auth = format!("Bearer {}", relay_api::token().unwrap_or_default());
-    let endpoint = relay_api::endpoint();
-    // The token goes only to the endpoint where this very instance answered an open /version just now. If it doesn't,
-    // this instance is already gone.
-    if !matches!(relay::probe_at(&endpoint), relay::Probe::Running(current) if current.get("instanceId").and_then(Value::as_str) == Some(instance)) {
-        return Ok(());
-    }
-    let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0 && *pid != std::process::id());
+    let pid = relay::stop_pid(version);
     let paths = relay_api::paths();
     let configured = browse_relay::port::configured_port();
     // Relays after relay.json's introduction remove it after their final tab write and shutdown log; while it still
     // names this instance the files they write as they exit may still come, so uninstall can't delete their folders yet.
     let recorded = browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance);
-    match http::request(&endpoint, "POST", "/shutdown", &[("Authorization", auth.as_str()), ("Content-Type", "application/json")], Some(body.as_bytes()), Some(Duration::from_secs(30))) {
+    let auth = format!("Bearer {}", relay_api::token().unwrap_or_default());
+    match http::request(endpoint, "POST", "/shutdown", &[("Authorization", auth.as_str())], Some(body.as_bytes()), Some(Duration::from_secs(30))) {
         Ok(response) if (200..300).contains(&response.status) => {}
         // It went away on its own, or another process replaced it first.
         Err(http::Error::Unreachable(_)) => {}
-        Ok(response) if response.status == 409 && gone(&endpoint, instance) => {}
+        Ok(response) if response.status == 409 && gone(endpoint, instance) => {}
         Ok(response) => {
             let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
             let message = value.get("error").and_then(|e| e.get("message").or(Some(e))).and_then(Value::as_str).map(str::to_owned);
@@ -66,7 +60,7 @@ pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
         Err(error) => bail!("the older browse relay ({running}) didn't stop for browse {VERSION}: {error}"),
     }
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !gone(&endpoint, instance) {
+    while !gone(endpoint, instance) {
         if Instant::now() > deadline {
             bail!("the older browse relay ({running}) accepted the shutdown but is still running");
         }
@@ -117,11 +111,12 @@ pub fn runtime_switch(args: &[String]) -> anyhow::Result<i32> {
         eprintln!("browse {wanted} isn't installed here (this is {VERSION})");
         return Ok(1);
     }
-    let relay::Probe::Running(version) = relay::probe() else { return Ok(0) };
+    let (endpoint, found) = relay::probe_endpoint();
+    let relay::Probe::Running(version) = found else { return Ok(0) };
     if !is_legacy(&version) {
         return Ok(0);
     }
-    if let Err(error) = stop(&version, force) {
+    if let Err(error) = stop(&endpoint, &version, force) {
         eprintln!("{error:#}");
         return Ok(1);
     }
@@ -183,6 +178,10 @@ mod tests {
                 while !stopping.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // Accepted sockets can inherit non-blocking mode; read the request blocking with a short
+                            // timeout so the answer (or the silence) is deterministic on macOS and Windows too.
+                            stream.set_nonblocking(false).ok();
+                            stream.set_read_timeout(Some(Duration::from_millis(500))).ok();
                             let mut request = [0u8; 2048];
                             let _ = stream.read(&mut request);
                             match reply {

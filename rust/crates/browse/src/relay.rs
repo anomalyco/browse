@@ -40,8 +40,16 @@ pub(crate) fn answer_at(endpoint: &str, timeout: Duration) -> Result<Answer, htt
     Ok(answer(response.status, &response.body))
 }
 
+/// One endpoint and what answers its open `/version` there. A stop keeps both, so its token and its wait stay on
+/// the relay it verified.
+pub(crate) fn probe_endpoint() -> (String, Probe) {
+    let endpoint = relay_api::endpoint();
+    let probe = probe_at(&endpoint);
+    (endpoint, probe)
+}
+
 pub fn probe() -> Probe {
-    probe_at(&relay_api::endpoint())
+    probe_endpoint().1
 }
 
 /// What answers a relay's open `/version` at `endpoint`. A handover passes the endpoint `/shutdown` went to: resolving
@@ -61,9 +69,10 @@ pub fn probe_at(endpoint: &str) -> Probe {
 
 /// The running relay's /version, starting one when none is listening.
 pub fn ensure() -> anyhow::Result<Value> {
-    match probe() {
+    let (endpoint, found) = probe_endpoint();
+    match found {
         // A relay of the TypeScript browse can't serve this build: hand over to this one.
-        Probe::Running(version) if crate::legacy::is_legacy(&version) => crate::legacy::stop(&version, false)?,
+        Probe::Running(version) if crate::legacy::is_legacy(&version) => crate::legacy::stop(&endpoint, &version, false)?,
         Probe::Running(version) => return Ok(version),
         // Another program's server on the default port: a relay that may choose its port takes a free fallback one.
         Probe::Foreign(message) if browse_relay::port::pinned() => bail!(message),
@@ -84,33 +93,35 @@ pub fn ensure() -> anyhow::Result<Value> {
     }
 }
 
+/// The relay pid from its `/version`, when it is safe to signal: a positive `i32` and not this process. Parsing
+/// through `i32` first keeps a bogus huge pid from wrapping into a negative kill target.
+pub(crate) fn stop_pid(version: &Value) -> Option<u32> {
+    let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| i32::try_from(pid).ok()).filter(|pid| *pid > 0)?;
+    let pid = u32::try_from(pid).ok()?;
+    (pid != std::process::id()).then_some(pid)
+}
+
 /// Stops a running relay and waits until it's done: the tab registry and shutdown log are written before relay.json
 /// goes. Agent tabs stay open and the next relay takes them back.
 pub fn stop() -> anyhow::Result<bool> {
-    let version = match probe() {
+    let (endpoint, found) = probe_endpoint();
+    let version = match found {
         Probe::Running(version) => version,
         _ => return Ok(false),
     };
     if crate::legacy::is_legacy(&version) {
-        crate::legacy::stop(&version, true)?;
+        crate::legacy::stop(&endpoint, &version, true)?;
         return Ok(true);
     }
     let instance = version.get("instanceId").and_then(Value::as_str).unwrap_or_default().to_owned();
-    let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0 && *pid != std::process::id());
-    let endpoint = relay_api::endpoint();
-    // The bearer token goes only to the endpoint where this very instance answered an open /version just now. If it
-    // doesn't, this instance is already gone and there is nothing to stop.
-    if !matches!(probe_at(&endpoint), Probe::Running(current) if current.get("instanceId").and_then(Value::as_str) == Some(instance.as_str())) {
-        return Ok(false);
-    }
+    let pid = stop_pid(&version);
     let paths = relay_api::paths();
     let configured = browse_relay::port::configured_port();
     // The relay removes relay.json after its final tab write and shutdown log (serve.rs). While it still names this
     // instance, the files it writes as it exits may still come, so uninstall can't delete browse's folders yet.
     let recorded = browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance);
     let auth = format!("Bearer {}", relay_api::token().unwrap_or_default());
-    let client_pid = std::process::id().to_string();
-    match http::request(&endpoint, "POST", "/shutdown", &[("Authorization", auth.as_str()), ("OpenCode-Browser-Client-Pid", client_pid.as_str())], Some(b"{}"), Some(Duration::from_secs(10))) {
+    match http::request(&endpoint, "POST", "/shutdown", &[("Authorization", auth.as_str())], Some(b"{}"), Some(Duration::from_secs(10))) {
         Ok(response) if (200..300).contains(&response.status) => {}
         // It stopped before answering: wait for it to finish with its files below.
         Err(http::Error::Unreachable(_)) => {}
