@@ -682,6 +682,7 @@ fn retaking_the_state_lock_panics_instead_of_deadlocking() {
         build_id: String::new(),
         auto_update: None,
         firefox: None,
+        installed: None,
     })
     .unwrap();
     let held = relay.st();
@@ -703,6 +704,7 @@ fn the_state_lock_can_be_taken_again_once_released() {
         build_id: String::new(),
         auto_update: None,
         firefox: None,
+        installed: None,
     };
     let one = crate::relay::Relay::new(config(paths.clone())).unwrap();
     let two = crate::relay::Relay::new(config(paths.clone())).unwrap();
@@ -730,6 +732,7 @@ fn an_address_never_replaces_a_known_browser_name() {
         build_id: String::new(),
         auto_update: None,
         firefox: None,
+        installed: None,
     })
     .unwrap();
     let mut st = relay.st();
@@ -913,6 +916,7 @@ fn a_persist_queued_after_the_final_one_does_nothing() {
         build_id: String::new(),
         auto_update: None,
         firefox: None,
+        installed: None,
     })
     .unwrap();
     relay.persist_now();
@@ -2147,4 +2151,73 @@ async fn chosen_ids_are_unique_across_two_browsers_and_new_takes_the_browser_opt
     let other = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "second-id", "browser": "test-chrome-2" })).await).unwrap());
     assert_ne!(other["tab"], named);
     assert_eq!(second_seen.commands("tabs.create").len(), 1);
+}
+
+#[test]
+fn a_chrome_hello_is_named_helium_only_when_helium_is_the_one_that_could_send_it() {
+    use crate::handshake::{Brand, helium_among};
+    let brand = |list: &[&str]| helium_among(&list.iter().map(|name| name.to_string()).collect::<Vec<_>>());
+    // Helium says it is Google Chrome; with no other browser here that says so, it's Helium.
+    assert_eq!(brand(&["Helium"]), Brand::Is("Helium".into()));
+    assert_eq!(brand(&["Helium", "Helium", "Microsoft Edge", "Chromium"]), Brand::Is("Helium".into()));
+    // No Helium: the hello's word stands, whichever other browsers are here.
+    assert_eq!(brand(&["Vivaldi"]), Brand::Hello);
+    assert_eq!(brand(&["Brave"]), Brand::Hello);
+    assert_eq!(brand(&[]), Brand::Hello);
+    // Helium and another browser that may say "Chrome": can't tell.
+    assert_eq!(brand(&["Google Chrome", "Helium"]), Brand::Unsure);
+    assert_eq!(brand(&["Google Chrome Beta", "Helium"]), Brand::Unsure);
+    assert_eq!(brand(&["Helium", "Vivaldi"]), Brand::Unsure);
+}
+
+#[test]
+fn an_unsure_brand_keeps_a_browser_named_helium() {
+    use crate::handshake::{Brand, browser_label};
+    assert_eq!(browser_label(&Brand::Unsure, "Chrome", Some("Helium on box"), "box"), "Helium");
+    assert_eq!(browser_label(&Brand::Unsure, "Chrome", Some("Chrome on box"), "box"), "Chrome");
+    assert_eq!(browser_label(&Brand::Unsure, "Chrome", Some("Work"), "box"), "Chrome", "a name cleared in settings isn't kept");
+    assert_eq!(browser_label(&Brand::Unsure, "Chrome", None, "box"), "Chrome");
+    assert_eq!(browser_label(&Brand::Is("Helium".into()), "Chrome", Some("Chrome on box"), "box"), "Helium");
+    assert_eq!(browser_label(&Brand::Hello, "Brave", Some("Helium on box"), "box"), "Brave");
+}
+
+#[tokio::test]
+async fn only_a_local_unnamed_chrome_hello_is_looked_up() {
+    use crate::handshake::{Brand, browser_label, local_brand};
+    let relay_with = |paths: &Paths, installed: crate::relay::InstalledBrowsers| {
+        crate::relay::Relay::new(crate::relay::RelayConfig {
+            paths: paths.clone(),
+            configured_port: 0,
+            port: 0,
+            host: "127.0.0.1".into(),
+            version: "0".into(),
+            build_id: String::new(),
+            auto_update: None,
+            firefox: None,
+            installed: Some(installed),
+        })
+        .unwrap()
+    };
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-brand-{}", crate::util::random_hex(6))));
+    let relay = relay_with(&paths, Arc::new(|| vec!["Helium".to_string()]));
+    let local: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let remote: std::net::SocketAddr = "192.0.2.1:1".parse().unwrap();
+    let hello = |params: Value| json!({ "method": "hello", "params": params });
+    assert_eq!(local_brand(&relay, &local, &hello(json!({ "browser": "Chrome" }))).await, Brand::Is("Helium".into()));
+    assert_eq!(local_brand(&relay, &local, &hello(json!({ "browser": "Chrome", "name": "Work" }))).await, Brand::Hello, "its own name");
+    assert_eq!(local_brand(&relay, &remote, &hello(json!({ "browser": "Chrome" }))).await, Brand::Hello, "another computer");
+    assert_eq!(local_brand(&relay, &local, &hello(json!({ "browser": "Brave" }))).await, Brand::Hello, "not Chrome");
+
+    // A lookup that fails is unsure, and a browser already named Helium keeps its name and id.
+    let failing = relay_with(&paths, Arc::new(|| panic!("the browser list could not be read")));
+    let brand = local_brand(&failing, &local, &hello(json!({ "browser": "Chrome" }))).await;
+    assert_eq!(brand, Brand::Unsure);
+    let mut st = failing.st();
+    let first = st.identify(&paths, "k", "Helium on box", false);
+    let previous = st.known.get("k").map(|known| known.name.clone());
+    let label = browser_label(&brand, "Chrome", previous.as_deref(), "box");
+    assert_eq!(st.identify(&paths, "k", &format!("{label} on box"), false), first);
+    assert_eq!(first.0, "helium-box");
+    drop(st);
+    let _ = std::fs::remove_dir_all(&paths.data);
 }

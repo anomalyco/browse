@@ -563,7 +563,7 @@ describe("toolbar clicks that can't attach", () => {
     expect(stub.state.notifications.size).toBe(0)
     await failedAttach(userTab, "Cannot access a chrome:// URL")
     await until(() => stub.state.notifications.size === 1)
-    expect(notice()?.message).toBe("browse can't use this page. Chrome doesn't let extensions control browser pages or the Chrome Web Store.")
+    expect(notice()?.message).toBe("browse can't use this page. Browsers don't let extensions control their own pages or the extension store.")
   })
 
   test("a chrome:// tab Chrome dropped from the debugger still sends a connected take-back", async () => {
