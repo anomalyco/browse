@@ -178,7 +178,7 @@ impl Relay {
         if changed {
             let link = self.st().browser_tab(tab).map(|(link, _)| link);
             match link {
-                Some(link) if link.supports(protocol::CAPABILITY_KEEP_OPEN) => {
+                Some(link) if link.keeps_open() => {
                     self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
                 }
                 Some(link) if keep_open => self.warn_keep_open_unavailable(tab, &link),
@@ -249,7 +249,7 @@ impl Relay {
     /// one back.
     pub fn warn_keep_open_unavailable(&self, tab: i64, link: &Link) {
         let version = link.version.as_deref().map(|v| format!(" ({v})")).unwrap_or_default();
-        let warning = format!("The connected browse extension{version} can't keep tabs open yet, so this tab still closes when idle. Update the extension to keep it open.");
+        let warning = format!("The connected browse extension{version} can't keep tabs open yet, so this tab still closes when idle. Update the extension to 0.1.2 or newer to keep it open.");
         if let Some(entry) = self.st().tabs.get_mut(&tab) {
             entry.add_warning(warning);
         }

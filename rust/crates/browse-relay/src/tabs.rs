@@ -186,6 +186,8 @@ impl Relay {
         }
         self.debugger(tab, None, "Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }), limit).await?;
         let keep_open = options.keep_open;
+        // The same page attached again (a renewed debugger): the agent was already told about its keepOpen.
+        let reattached = self.st().tabs.get(&tab).is_some_and(|t| t.target_id == target_id);
         {
             let mut st = self.st();
             let previous = st.tabs.remove(&tab);
@@ -249,9 +251,11 @@ impl Relay {
         // current value to an extension that knows keep-open: it keeps the flag per tracked tab, and a tab it released
         // stays tracked, so a stale true would otherwise never be cleared (sending false is harmless when untracked).
         // An extension that can't hold a tab gets a warning instead: the tab still opens, and only the relay keeps it.
-        if link.supports(CAPABILITY_KEEP_OPEN) {
+        // The warning is for a tab the agent just opened: a re-attach (a reconnect, a renewed debugger, a relay restart
+        // reclaiming the tab) must not tell it again.
+        if link.keeps_open() {
             self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
-        } else if keep_open {
+        } else if keep_open && !attach.restore && !reattached {
             self.warn_keep_open_unavailable(tab, &link);
         }
         self.refresh_presentation(tab, true);
@@ -455,7 +459,7 @@ impl Relay {
             bail!("The browse extension in {} is too old to choose a tab's window (newWindow, windowOf). Update it (chrome://extensions, Update), then try again; or open the tab without them.", link.name);
         }
         let mut params = json!({ "url": "about:blank", "active": false });
-        if options.keep_open && link.supports(CAPABILITY_KEEP_OPEN) {
+        if options.keep_open && link.keeps_open() {
             params["keepOpen"] = true.into();
         }
         let override_window = crate::settings::agent_window_override();
@@ -833,6 +837,8 @@ impl Relay {
                 attach.created_at = Some(known.created_at);
                 attach.chosen = known.chosen;
                 attach.expect_target = Some(target.clone());
+                // This is the tab as it was, not a new one: a keepOpen warning already reached the agent.
+                attach.restore = true;
                 match relay.setup_tab(attach).await {
                     Ok(_) => rlog!("extension.reconnect.reattached", tabId = tab),
                     Err(error) => rlog!("extension.reconnect.lost", tabId = tab, target = target, error = error.to_string()),

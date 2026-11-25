@@ -151,6 +151,12 @@ impl Link {
         self.capabilities.contains(capability)
     }
 
+    /// Whether the extension holds a tab past its own idle cleanup (`tabs.keepOpen`, `keepOpen` on `tabs.create`).
+    /// An announced `keep-open` is authoritative; otherwise the extension must be new enough to handle it anyway.
+    pub fn keeps_open(&self) -> bool {
+        self.supports(protocol::CAPABILITY_KEEP_OPEN) || self.version.as_deref().is_some_and(protocol::version_keeps_open)
+    }
+
     /// Paired, inventory reconciled, answering and speaking our protocol.
     pub fn connected(&self) -> bool {
         !self.closed.load(Ordering::SeqCst) && self.ready.load(Ordering::SeqCst) && !self.unresponsive() && self.protocol.compatible
