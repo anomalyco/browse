@@ -592,12 +592,17 @@ fn switch_hint(exe: &Path) -> String {
     format!("run `{} install` for the self-updating binary, or install it globally with one of {globals}", exe.display())
 }
 
+/// The value of `--mode`, if given. A `--mode` with no value is an error, not a manual update.
+fn mode_arg(args: &[String]) -> anyhow::Result<Option<Mode>> {
+    let Some(i) = args.iter().position(|a| a == "--mode") else { return Ok(None) };
+    let value = args.get(i + 1).context("--mode needs a value: on, notify or off")?;
+    Mode::parse(value).map(Some).context("--mode is on, notify or off")
+}
+
 /// `browse update [--check]`.
 pub fn command(args: &[String]) -> anyhow::Result<()> {
     let check_only = args.iter().any(|a| a == "--check");
-    let mode = args.iter().position(|a| a == "--mode").and_then(|i| args.get(i + 1));
-    if let Some(mode) = mode {
-        let mode = Mode::parse(mode).context("--mode is on, notify or off")?;
+    if let Some(mode) = mode_arg(args)? {
         set_mode(mode)?;
         println!("Automatic updates: {}", describe_mode(mode));
         if let Some(fixed) = override_mode().filter(|m| *m != mode) {
@@ -1012,6 +1017,16 @@ fn record_failure(version: &str, error: &anyhow::Error) {
 #[cfg(test)]
 mod tests {
     use super::{Global, Install, Kind, Manager, Runner, dist_tag, package_wanted};
+
+    #[test]
+    fn mode_without_a_value_is_an_error() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::mode_arg(&args(&[])).unwrap(), None);
+        assert_eq!(super::mode_arg(&args(&["--check"])).unwrap(), None);
+        assert_eq!(super::mode_arg(&args(&["--mode", "off"])).unwrap(), Some(super::Mode::Off));
+        assert!(super::mode_arg(&args(&["--mode"])).unwrap_err().to_string().contains("--mode needs a value"));
+        assert!(super::mode_arg(&args(&["--mode", "sometimes"])).is_err());
+    }
 
     #[test]
     fn checks_name_the_install_kind_in_the_user_agent() {
