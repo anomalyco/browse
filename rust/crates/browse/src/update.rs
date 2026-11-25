@@ -592,12 +592,40 @@ fn switch_hint(exe: &Path) -> String {
     format!("run `{} install` for the self-updating binary, or install it globally with one of {globals}", exe.display())
 }
 
-/// `browse update [--check]`.
+/// `browse update`'s options.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Options {
+    check: bool,
+    mode: Option<Mode>,
+}
+
+impl Options {
+    /// `browse update [--check] [--mode <on|notify|off>]`. A `--mode` with nothing after it, or followed by
+    /// another flag, is an error; treating it as no `--mode` at all would run a manual update instead.
+    fn parse(args: &[String]) -> anyhow::Result<Options> {
+        let mut options = Options::default();
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--check" => options.check = true,
+                "--mode" => {
+                    i += 1;
+                    let value = args.get(i).filter(|value| !value.starts_with('-')).with_context(|| "--mode needs a value: on, notify or off")?;
+                    options.mode = Some(Mode::parse(value).context("--mode is on, notify or off")?);
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        Ok(options)
+    }
+}
+
+/// `browse update [--check] [--mode <on|notify|off>]`.
 pub fn command(args: &[String]) -> anyhow::Result<()> {
-    let check_only = args.iter().any(|a| a == "--check");
-    let mode = args.iter().position(|a| a == "--mode").and_then(|i| args.get(i + 1));
-    if let Some(mode) = mode {
-        let mode = Mode::parse(mode).context("--mode is on, notify or off")?;
+    let options = Options::parse(args)?;
+    let check_only = options.check;
+    if let Some(mode) = options.mode {
         set_mode(mode)?;
         println!("Automatic updates: {}", describe_mode(mode));
         if let Some(fixed) = override_mode().filter(|m| *m != mode) {
@@ -1012,6 +1040,33 @@ fn record_failure(version: &str, error: &anyhow::Error) {
 #[cfg(test)]
 mod tests {
     use super::{Global, Install, Kind, Manager, Runner, dist_tag, package_wanted};
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    /// A `--mode` with nothing after it, or with another flag after it, is an error naming the missing value and
+    /// the modes; reading it as no `--mode` at all would update by hand instead.
+    #[test]
+    fn a_mode_without_a_value_is_an_error() {
+        for words in [&["--mode"][..], &["--check", "--mode"][..], &["--mode", "--check"][..]] {
+            let error = super::command(&args(words)).unwrap_err();
+            assert_eq!(format!("{error:#}"), "--mode needs a value: on, notify or off", "browse update {}", words.join(" "));
+        }
+        let error = super::command(&args(&["--mode", "sometimes"])).unwrap_err();
+        assert_eq!(format!("{error:#}"), "--mode is on, notify or off");
+    }
+
+    /// The documented forms still parse as before, `--check` next to a mode included.
+    #[test]
+    fn update_options_still_take_check_and_a_mode() {
+        assert_eq!(super::Options::parse(&args(&[])).unwrap(), super::Options::default());
+        assert_eq!(super::Options::parse(&args(&["--check"])).unwrap(), super::Options { check: true, mode: None });
+        assert_eq!(
+            super::Options::parse(&args(&["--check", "--mode", "notify"])).unwrap(),
+            super::Options { check: true, mode: Some(super::Mode::Notify) }
+        );
+    }
 
     #[test]
     fn checks_name_the_install_kind_in_the_user_agent() {
