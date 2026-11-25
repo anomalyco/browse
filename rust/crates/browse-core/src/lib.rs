@@ -4,6 +4,7 @@
 //! of them; and the binary wires everything together.
 
 pub mod driver;
+pub mod image;
 
 pub use driver::{
     Arg, BodyKind, BrowserDriver, BrowserEvent, CallOptions, CaptureDriver, CloseReason, ConsoleEntry, ConsoleEvent,

@@ -47,31 +47,7 @@ const MAX_INLINE_SIDE: f64 = 8_000.0;
 const MAX_SAVED_SIDE: f64 = 16_384.0;
 
 
-/// Width and height of a PNG, JPEG or WebP image.
-pub(crate) fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
-        return Some((u32::from_be_bytes(bytes[16..20].try_into().ok()?), u32::from_be_bytes(bytes[20..24].try_into().ok()?)));
-    }
-    if bytes.starts_with(&[0xFF, 0xD8]) {
-        return crate::mkv::jpeg_size(bytes);
-    }
-    if bytes.len() >= 30 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        let le24 = |at: usize| u32::from(bytes[at]) | u32::from(bytes[at + 1]) << 8 | u32::from(bytes[at + 2]) << 16;
-        return match &bytes[12..16] {
-            b"VP8 " => Some((
-                u32::from(u16::from_le_bytes([bytes[26], bytes[27]]) & 0x3FFF),
-                u32::from(u16::from_le_bytes([bytes[28], bytes[29]]) & 0x3FFF),
-            )),
-            b"VP8L" => {
-                let bits = u32::from_le_bytes(bytes[21..25].try_into().ok()?);
-                Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
-            }
-            b"VP8X" => Some((le24(24) + 1, le24(27) + 1)),
-            _ => None,
-        };
-    }
-    None
-}
+pub(crate) use browse_core::image::image_size;
 
 fn region(args: &Value) -> anyhow::Result<Region> {
     let full_page = arg_bool(args, "fullPage")?.unwrap_or(false);
@@ -551,11 +527,6 @@ mod tests {
         (field("x"), field("y"), field("width"), field("height"))
     }
 
-    fn assert_whole(params: &Value) {
-        let clip = clip_of(params);
-        assert_eq!([clip.0, clip.1, clip.2, clip.3].map(f64::fract), [0.0; 4], "{params}");
-    }
-
     fn last_clip(cdp: &FakeCdp) -> (Value, (f64, f64, f64, f64)) {
         let calls = cdp.calls("Page.captureScreenshot");
         let params = calls.last().expect("a capture").0.clone();
@@ -577,58 +548,100 @@ mod tests {
         assert_eq!(clamp_clip((10.0, 10.0, 20.0, 20.0), (5.0, 5.0, 1.0, 1.0)), (5.0, 5.0, 1.0, 1.0));
     }
 
-    #[tokio::test]
-    async fn captures_send_whole_pixel_clips_inside_the_viewport() {
-        let cdp = fake();
-        layout(&cdp, 10.3, 100.5, 800.0, 600.0, 1600.4, 2400.6);
+    /// A fake capture surface of `width`x`height` device pixels whose pixels carry their own coordinates.
+    fn surface(cdp: &FakeCdp, width: u32, height: u32) {
+        let data = (0..height)
+            .flat_map(|y| (0..width).flat_map(move |x| [x as u8, y as u8, ((x >> 8) | ((y >> 8) << 4)) as u8, 255]))
+            .collect();
+        let image = crate::pixeldiff::Rgba { width, height, data };
+        cdp.reply(
+            "Page.captureScreenshot",
+            json!({ "data": base64::engine::general_purpose::STANDARD.encode(crate::pixeldiff::encode_png(&image).unwrap()) }),
+        );
+    }
 
-        let shot = capture(driver_of(&cdp).as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
-        assert_eq!((shot.width, shot.height), (1, 1));
-        for region in [Region::Clip(50.4, 30.6, 100.2, 50.3), Region::Clip(700.4, 550.0, 100.0, 50.0)] {
-            capture(driver_of(&cdp).as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
-        }
+    /// Where on the surface the shot's top-left pixel came from.
+    fn origin(shot: &Shot) -> (u32, u32) {
+        let image = decode_png(&shot.bytes).unwrap();
+        let [r, g, b, _] = image.data[..4] else { unreachable!() };
+        (r as u32 + (b as u32 & 15) * 256, g as u32 + (b as u32 >> 4) * 256)
+    }
 
+    /// On-screen captures take the whole viewport: a clip would make Chrome resize the user's view while capturing.
+    fn assert_no_clips(cdp: &FakeCdp) {
         let calls = cdp.calls("Page.captureScreenshot");
-        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert!(!calls.is_empty());
         for (params, _) in &calls {
-            assert_whole(params);
+            assert!(params.get("clip").is_none(), "{params}");
             assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
         }
-        assert_eq!(clip_of(&calls[0].0), (10.0, 101.0, 800.0, 600.0));
-        assert_eq!(clip_of(&calls[1].0), (61.0, 131.0, 100.0, 50.0));
-        // Near the edge the clip is shifted inside the viewport, not shrunk.
-        assert_eq!(clip_of(&calls[2].0), (710.0, 651.0, 100.0, 50.0));
+    }
+
+    async fn shoot(cdp: &std::sync::Arc<FakeCdp>, region: Region, css_scale: bool, max_side: f64) -> Shot {
+        capture(driver_of(cdp).as_ref(), &region, Format::Png, None, css_scale, max_side).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn captures_inside_the_viewport_cut_whole_pixels_out_of_the_viewport() {
+        let cdp = fake();
+        layout(&cdp, 10.3, 100.5, 800.0, 600.0, 1600.4, 2400.6);
+        surface(&cdp, 800, 600);
+
+        let shot = shoot(&cdp, Region::Viewport, true, MAX_SAVED_SIDE).await;
+        assert_eq!(((shot.width, shot.height), origin(&shot)), ((800, 600), (0, 0)));
+        let shot = shoot(&cdp, Region::Clip(50.4, 30.6, 100.2, 50.3), true, MAX_SAVED_SIDE).await;
+        assert_eq!(((shot.width, shot.height), origin(&shot)), ((100, 50), (51, 31)));
+        // Near the edge the region is shifted inside the viewport, not shrunk.
+        let shot = shoot(&cdp, Region::Clip(700.4, 550.0, 100.0, 50.0), true, MAX_SAVED_SIDE).await;
+        assert_eq!(((shot.width, shot.height), origin(&shot)), ((100, 50), (700, 550)));
+        assert_no_clips(&cdp);
+    }
+
+    #[tokio::test]
+    async fn a_1x_viewport_in_jpeg_or_webp_is_chromes_own_image() {
+        let cdp = fake();
+        layout(&cdp, 10.3, 100.5, 800.0, 600.0, 1600.4, 2400.6);
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 80).encode(&vec![200; 800 * 600 * 3], 800, 600, jpeg_encoder::ColorType::Rgb).unwrap();
+        // A lossless WebP header for 800x600.
+        let bits: u32 = 799 | (599 << 14);
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x2f".to_vec();
+        webp.extend_from_slice(&bits.to_le_bytes());
+        webp.resize(32, 0);
+        for (format, bytes) in [(Format::Jpeg, jpeg), (Format::Webp, webp)] {
+            cdp.reply("Page.captureScreenshot", json!({ "data": base64::engine::general_purpose::STANDARD.encode(&bytes) }));
+            let shot = capture(driver_of(&cdp).as_ref(), &Region::Viewport, format, Some(60), true, MAX_SAVED_SIDE).await.unwrap();
+            assert_eq!((shot.format, shot.width, shot.height, shot.note.as_deref()), (format, 800, 600, None));
+            assert_eq!(shot.bytes, bytes);
+            let (params, _) = cdp.calls("Page.captureScreenshot").pop().unwrap();
+            assert_eq!((params["format"].clone(), params["quality"].clone()), (json!(format.name()), json!(60)), "{params}");
+        }
+        assert_eq!(cdp.calls("Page.captureScreenshot").len(), 2);
+        assert_no_clips(&cdp);
     }
 
     #[tokio::test]
     async fn clip_size_does_not_depend_on_the_scroll_offset() {
         let cdp = fake();
-        let region = Region::Clip(40.0, 30.0, 100.0, 50.0);
+        surface(&cdp, 800, 600);
+        let mut shots = Vec::new();
         for page_y in [100.0, 100.5] {
             layout(&cdp, 10.3, page_y, 800.0, 600.0, 1600.4, 2400.6);
-            capture(driver_of(&cdp).as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+            let shot = shoot(&cdp, Region::Clip(40.0, 30.0, 100.0, 50.0), true, MAX_SAVED_SIDE).await;
+            shots.push(((shot.width, shot.height), origin(&shot)));
         }
-
-        let calls = cdp.calls("Page.captureScreenshot");
-        let sizes: Vec<(f64, f64)> = calls.iter().map(|(params, _)| { let (_, _, width, height) = clip_of(params); (width, height) }).collect();
-        assert_eq!(sizes, [(100.0, 50.0), (100.0, 50.0)], "{calls:?}");
-        // The scroll offset still moves the clip's origin.
-        assert_eq!(clip_of(&calls[0].0).1, 130.0);
-        assert_eq!(clip_of(&calls[1].0).1, 131.0);
-        for (params, _) in &calls {
-            assert_whole(params);
-        }
+        assert_eq!(shots, [((100, 50), (40, 30)), ((100, 50), (40, 31))]);
+        assert_no_clips(&cdp);
     }
 
     #[tokio::test]
     async fn full_page_inside_the_viewport_keeps_its_size() {
         let cdp = fake();
         layout(&cdp, 0.0, 0.0, 1280.0, 720.0, 1280.4, 720.3);
-        capture(driver_of(&cdp).as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
-
-        let (params, clip) = last_clip(&cdp);
-        assert_eq!(clip, (0.0, 0.0, 1280.0, 720.0));
-        assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
+        surface(&cdp, 1280, 720);
+        let shot = shoot(&cdp, Region::FullPage, true, MAX_SAVED_SIDE).await;
+        assert_eq!((shot.width, shot.height), (1280, 720));
+        assert_no_clips(&cdp);
     }
 
     #[tokio::test]
@@ -657,45 +670,41 @@ mod tests {
     async fn a_clip_above_the_viewport_is_clamped_to_its_origin() {
         let cdp = fake();
         layout(&cdp, 10.3, 100.5, 800.0, 600.0, 1600.4, 2400.6);
-        capture(driver_of(&cdp).as_ref(), &Region::Clip(-0.3, -0.2, 100.0, 50.0), Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
-
-        let (params, clip) = last_clip(&cdp);
-        assert_eq!(clip, (10.0, 101.0, 100.0, 50.0));
-        assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
+        surface(&cdp, 800, 600);
+        let shot = shoot(&cdp, Region::Clip(-0.3, -0.2, 100.0, 50.0), true, MAX_SAVED_SIDE).await;
+        assert_eq!(((shot.width, shot.height), origin(&shot)), ((100, 50), (0, 1)));
+        assert_no_clips(&cdp);
     }
 
     #[tokio::test]
     async fn an_edge_clip_keeps_its_size_at_any_scroll_offset() {
         let cdp = fake();
-        let region = Region::Clip(0.0, 0.4, 100.0, 600.0);
+        surface(&cdp, 800, 600);
+        let mut shots = Vec::new();
         for page_y in [100.4, 100.6] {
             layout(&cdp, 10.0, page_y, 800.0, 600.0, 1600.0, 2400.0);
-            capture(driver_of(&cdp).as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+            let shot = shoot(&cdp, Region::Clip(0.0, 0.4, 100.0, 600.0), true, MAX_SAVED_SIDE).await;
+            shots.push(((shot.width, shot.height), origin(&shot)));
         }
-
-        let calls = cdp.calls("Page.captureScreenshot");
-        let sizes: Vec<(f64, f64)> = calls.iter().map(|(params, _)| { let (_, _, width, height) = clip_of(params); (width, height) }).collect();
-        assert_eq!(sizes, [(100.0, 600.0), (100.0, 600.0)], "{calls:?}");
-        // The clip moves with the rounded viewport origin instead of losing a row.
-        assert_eq!(clip_of(&calls[0].0).1, 100.0);
-        assert_eq!(clip_of(&calls[1].0).1, 101.0);
+        assert_eq!(shots, [((100, 600), (0, 0)), ((100, 600), (0, 0))]);
+        assert_no_clips(&cdp);
     }
 
     #[tokio::test]
     async fn scaling_down_keeps_the_clip_whole() {
         let cdp = fake();
         layout(&cdp, 10.0, 100.0, 800.0, 600.0, 800.0, 600.0);
-        capture(driver_of(&cdp).as_ref(), &Region::Clip(20.2, 30.7, 100.0, 50.0), Format::Png, None, true, 50.0).await.unwrap();
-
-        let (params, clip) = last_clip(&cdp);
-        assert_eq!(clip, (30.0, 131.0, 100.0, 50.0));
-        assert_whole(&params);
-        assert_eq!(params["clip"]["scale"], json!(0.5), "{params}");
+        surface(&cdp, 800, 600);
+        let shot = shoot(&cdp, Region::Clip(20.2, 30.7, 100.0, 50.0), true, 50.0).await;
+        // Each image pixel averages a 2x2 block, the first one starting at (20, 31).
+        assert_eq!(((shot.width, shot.height), origin(&shot)), ((50, 25), (21, 32)));
+        assert!(shot.note.unwrap().contains("scaled down to 50%"));
+        assert_no_clips(&cdp);
     }
 
     #[tokio::test]
-    async fn page_zoom_converts_clips_to_device_independent_pixels() {
-        // 125% page zoom on a 2x screen: 960x400 CSS pixels fill 1200x500 DIP (2400 device pixels wide).
+    async fn page_zoom_and_a_2x_screen_convert_regions_to_device_pixels() {
+        // 125% page zoom on a 2x screen: 960x400 CSS pixels fill 1200x500 DIP, 2400x1000 device pixels.
         let cdp = fake();
         cdp.reply(
             "Page.getLayoutMetrics",
@@ -705,25 +714,20 @@ mod tests {
                 "cssContentSize": { "width": 960.0, "height": 3000.0 },
             }),
         );
-        let driver = driver_of(&cdp);
-        capture(driver.as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
-        let (params, clip) = last_clip(&cdp);
-        assert_eq!(clip, (0.0, 125.0, 1200.0, 500.0));
-        assert_eq!(params["clip"]["scale"], json!(0.4), "{params}");
+        surface(&cdp, 2400, 1000);
+        let shot = shoot(&cdp, Region::Viewport, true, MAX_SAVED_SIDE).await;
+        assert_eq!((shot.width, shot.height, shot.scale), (960, 400, 1.0));
+        let shot = shoot(&cdp, Region::Viewport, false, MAX_SAVED_SIDE).await;
+        assert_eq!((shot.width, shot.height, shot.scale), (2400, 1000, 2.5));
 
-        capture(driver.as_ref(), &Region::Viewport, Format::Png, None, false, MAX_SAVED_SIDE).await.unwrap();
-        let (params, clip) = last_clip(&cdp);
-        assert_eq!(clip, (0.0, 125.0, 1200.0, 500.0));
-        assert_eq!(params["clip"]["scale"], json!(1.0), "{params}");
+        // CSS (40, 40) is 50 DIP into the viewport, 100 device pixels.
+        let shot = shoot(&cdp, Region::Clip(40.0, 40.0, 80.0, 40.0), false, MAX_SAVED_SIDE).await;
+        assert_eq!(((shot.width, shot.height), origin(&shot)), ((200, 100), (100, 100)));
+        let shot = shoot(&cdp, Region::Clip(40.0, 40.0, 80.0, 40.0), true, MAX_SAVED_SIDE).await;
+        assert_eq!((shot.width, shot.height, shot.scale), (80, 40, 1.0));
+        assert_no_clips(&cdp);
 
-        let shot = capture(driver.as_ref(), &Region::Clip(40.0, 40.0, 80.0, 40.0), Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
-        let (params, clip) = last_clip(&cdp);
-        assert_eq!(clip, (50.0, 175.0, 100.0, 50.0));
-        assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
-        // The fake returns a 1x1 image for an 80 CSS pixel wide clip.
-        assert_eq!(shot.scale, 1.0 / 80.0);
-
-        capture(driver.as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        capture(driver_of(&cdp).as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
         let (params, clip) = last_clip(&cdp);
         assert_eq!(clip, (0.0, 0.0, 1200.0, 3750.0));
         assert_eq!(params["captureBeyondViewport"], json!(true), "{params}");

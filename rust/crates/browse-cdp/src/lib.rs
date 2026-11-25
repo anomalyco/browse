@@ -8,10 +8,12 @@
 //! - HTML5 drag interception (`Input.setInterceptDrags` / `Input.dragIntercepted` / `Input.dispatchDragEvent`)
 //! - Native file chooser interception across the tab and its out-of-process iframes
 //! - Dialog scope tracking, DOM key-to-CDP translation, and tiled fallback for oversized screenshots
+//! - On-screen screenshot regions cut out of a clip-less viewport capture, so the user's view never resizes
 
 mod console;
 mod input;
 mod network;
+mod raster;
 mod screencast;
 pub mod wire;
 
@@ -1023,15 +1025,15 @@ impl CdpTabDriver {
             let png_bytes = self
                 .capture_raw(ImageFormat::Png, None, Some((left, top, tw, th, scale)), true)
                 .await?;
-            let (w, h, data) = decode_png_rgba(&png_bytes)?;
-            if w != expected_width {
+            let tile = browse_core::image::decode_png(&png_bytes)?;
+            if tile.width != expected_width {
                 return Err(DriverError::Protocol("tiles came back with different widths".into()));
             }
-            stitched_height += h;
-            rgba.extend_from_slice(&data);
+            stitched_height += tile.height;
+            rgba.extend_from_slice(&tile.data);
             offset += part;
         }
-        encode_png_rgba(expected_width, stitched_height, &rgba)
+        browse_core::image::encode_png(&browse_core::image::Rgba { width: expected_width, height: stitched_height, data: rgba })
     }
 }
 
@@ -1689,6 +1691,30 @@ impl TabDriver for CdpTabDriver {
                 beyond_viewport,
             ),
         };
+        if let Some((x, y, width, height, scale)) = clip
+            && !beyond
+        {
+            // A clip makes Chrome resize the tab's view to it while capturing (see raster), so a region on screen is
+            // taken from a capture of the whole viewport, without a clip.
+            let viewport = self.viewport().await?;
+            let zoom = viewport.page_zoom;
+            let on_screen = raster::OnScreen {
+                region: (x - viewport.page_x * zoom, y - viewport.page_y * zoom, width, height),
+                viewport: (viewport.width * zoom, viewport.height * zoom),
+                ratio: viewport.device_pixel_ratio,
+                scale,
+            };
+            // The whole viewport at native resolution is Chrome's own image, in the format asked for, unless
+            // scrollbars make the capture larger than the region.
+            if shot.format != ImageFormat::Png && on_screen.is_whole(on_screen.expected_whole()) {
+                let bytes = self.capture_raw(shot.format, shot.quality, None, false).await?;
+                if raster::as_is(&bytes, &on_screen) {
+                    return Ok(Image { bytes, format: shot.format, note: None });
+                }
+            }
+            let png = self.capture_raw(ImageFormat::Png, None, None, false).await?;
+            return raster::cut(png, &on_screen, shot.format, shot.quality);
+        }
         match self.capture_raw(shot.format, shot.quality, clip, beyond).await {
             Ok(bytes) => Ok(Image { bytes, format: shot.format, note: None }),
             Err(DriverError::Protocol(message))
@@ -1965,61 +1991,6 @@ fn parse_js_error(details: &Value) -> JsError {
         column: details.get("columnNumber").and_then(Value::as_i64),
         is_compile_syntax_error,
     }
-}
-
-fn decode_png_rgba(bytes: &[u8]) -> DriverResult<(u32, u32, Vec<u8>)> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder
-        .read_info()
-        .map_err(|e| DriverError::Protocol(format!("invalid PNG tile: {e}")))?;
-    let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
-    let info = reader
-        .next_frame(&mut buf)
-        .map_err(|e| DriverError::Protocol(format!("invalid PNG tile frame: {e}")))?;
-    let raw = &buf[..info.buffer_size()];
-    let rgba = match info.color_type {
-        png::ColorType::Rgba => raw.to_vec(),
-        png::ColorType::Rgb => {
-            let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
-            for &[r, g, b] in raw.as_chunks::<3>().0 {
-                out.extend_from_slice(&[r, g, b, 255]);
-            }
-            out
-        }
-        png::ColorType::GrayscaleAlpha => {
-            let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
-            for &[g, a] in raw.as_chunks::<2>().0 {
-                out.extend_from_slice(&[g, g, g, a]);
-            }
-            out
-        }
-        png::ColorType::Grayscale => {
-            let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
-            for &g in raw {
-                out.extend_from_slice(&[g, g, g, 255]);
-            }
-            out
-        }
-        other => return Err(DriverError::Protocol(format!("unsupported PNG color type {other:?}"))),
-    };
-    Ok((info.width, info.height, rgba))
-}
-
-fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> DriverResult<Vec<u8>> {
-    let mut out = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut out, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder
-            .write_header()
-            .map_err(|e| DriverError::Protocol(format!("PNG encode failed: {e}")))?;
-        writer
-            .write_image_data(rgba)
-            .map_err(|e| DriverError::Protocol(format!("PNG encode failed: {e}")))?;
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

@@ -76,36 +76,7 @@ fn concat(parts: &[Vec<u8>]) -> Vec<u8> {
     parts.concat()
 }
 
-/// Width and height from a JPEG's start-of-frame marker.
-pub fn jpeg_size(data: &[u8]) -> Option<(u32, u32)> {
-    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
-        return None;
-    }
-    let mut index = 2;
-    while index + 9 < data.len() {
-        if data[index] != 0xFF {
-            index += 1;
-            continue;
-        }
-        let marker = data[index + 1];
-        if marker == 0xFF {
-            index += 1;
-            continue;
-        }
-        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
-            index += 2;
-            continue;
-        }
-        let length = u16::from_be_bytes([data[index + 2], data[index + 3]]) as usize;
-        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
-            let height = u16::from_be_bytes([data[index + 5], data[index + 6]]) as u32;
-            let width = u16::from_be_bytes([data[index + 7], data[index + 8]]) as u32;
-            return Some((width, height));
-        }
-        index += 2 + length;
-    }
-    None
-}
+pub use browse_core::image::jpeg_size;
 
 pub struct MjpegWriter<W: Write + Seek> {
     out: W,
