@@ -47,6 +47,7 @@ const commandMethods = [
   "tabs.create",
   "tabs.remove",
   "tabs.keepOpen",
+  "tabs.windows",
   "tabs.group",
   "tabs.ungroup",
   "action.setAttached",

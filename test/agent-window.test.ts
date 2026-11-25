@@ -88,6 +88,101 @@ describe("AgentWindow.open", () => {
     expect(stub.state.tabs.get(separate.id!)!.windowId).toBe(separate.windowId)
   })
 
+  test("a labelled tab follows its label's tabs into the window the user moved them to", async () => {
+    const user = await userWindow({ left: 0, top: 30, width: 600, height: 600 })
+    const first = (await AgentWindow.open("https://example.com/1")).tab
+    tracked.push(first.id!)
+    TabCleanup.track(first.id!)
+    const task = await stub.chrome.windows.create({ focused: false })
+    await stub.chrome.tabs.move(first.id!, { windowId: task.id, index: -1 })
+    stub.state.created.length = 0
+    const { tab, rule, created } = await AgentWindow.open("https://example.com/2", { follow: [first.id!] })
+    expect(tab.windowId).toBe(task.id)
+    expect(rule).toBe("followed")
+    expect(created).toBe(false)
+    expect(tab.active).toBe(false)
+    expect(stub.state.focusedWindowId).toBe(user.id)
+    expect(stub.state.activations).toEqual([])
+    // Without the label, the agent-only window is still passed over.
+    expect((await AgentWindow.open("https://example.com/3")).tab.windowId).toBe(user.id)
+  })
+
+  test("a label split across windows follows the tab the user used last; a minimized window is skipped", async () => {
+    await userWindow({ left: 0, top: 30, width: 600, height: 600 })
+    const a = await stub.chrome.windows.create({ url: "https://a.example/", focused: false })
+    const b = await stub.chrome.windows.create({ url: "https://b.example/", focused: false })
+    const tabIn = (id: number) => [...stub.state.tabs.values()].find((tab) => tab.windowId === id)!
+    await stub.chrome.tabs.update(tabIn(a.id!).id, { lastAccessed: 100 })
+    await stub.chrome.tabs.update(tabIn(b.id!).id, { lastAccessed: 200 })
+    const follow = [tabIn(a.id!).id, tabIn(b.id!).id]
+    const split = await AgentWindow.open("https://example.com/", { follow })
+    expect(split.tab.windowId).toBe(b.id)
+    // Both windows come back, the one it went to first, so the relay can tell the agent the label is split.
+    expect(split.windows).toEqual([b.id!, a.id!])
+    stub.state.windows.get(b.id!)!.state = "minimized"
+    const visible = await AgentWindow.open("https://example.com/", { follow })
+    expect(visible.tab.windowId).toBe(a.id)
+    expect(visible.windows).toEqual([a.id!])
+  })
+
+  test("follows nothing when the label's tabs are gone, and falls back to the setting", async () => {
+    const user = await userWindow({ left: 0, top: 30, width: 600, height: 600 })
+    const { tab, rule } = await AgentWindow.open("https://example.com/", { follow: [9999] })
+    expect(tab.windowId).toBe(user.id)
+    expect(rule).toBe("last-focused")
+  })
+
+  test("follow wins over the separate setting: a task the user moved stays where they put it", async () => {
+    await stub.chrome.storage.local.set({ agentTabsWindow: "separate" })
+    const user = await userWindow({ left: 0, top: 30, width: 600, height: 600 })
+    const first = (await AgentWindow.open("https://example.com/1")).tab
+    expect(first.windowId).toBe((await AgentWindow.id())!)
+    await stub.chrome.tabs.move(first.id!, { windowId: user.id, index: -1 })
+    const { tab, rule } = await AgentWindow.open("https://example.com/2", { follow: [first.id!] })
+    expect(tab.windowId).toBe(user.id)
+    expect(rule).toBe("followed")
+    expect(stub.state.activations).toEqual([])
+  })
+
+  test("beside opens in the named tab's window, over the label and the setting, without focusing it", async () => {
+    const user = await userWindow({ left: 0, top: 30, width: 600, height: 600 })
+    const other = await stub.chrome.windows.create({ url: "https://lent.example/", focused: false })
+    const lent = [...stub.state.tabs.values()].find((tab) => tab.windowId === other.id)!
+    const labelled = (await AgentWindow.open("https://example.com/1")).tab
+    const { tab, rule } = await AgentWindow.open("https://example.com/2", {
+      beside: lent.id,
+      follow: [labelled.id!],
+      override: "separate",
+    })
+    expect(tab.windowId).toBe(other.id)
+    expect(rule).toBe("beside")
+    expect(tab.active).toBe(false)
+    expect(stub.state.focusedWindowId).toBe(user.id)
+    await expect(AgentWindow.open("https://example.com/3", { beside: 9999 })).rejects.toThrow("gone")
+  })
+
+  test("windowsOf says which window each tab is in and leaves out tabs that are gone", async () => {
+    const a = await stub.chrome.windows.create({ url: "https://a.example/", focused: false })
+    const b = await stub.chrome.windows.create({ url: "https://b.example/", focused: false })
+    const tabIn = (id: number) => [...stub.state.tabs.values()].find((tab) => tab.windowId === id)!.id
+    expect(await AgentWindow.windowsOf([tabIn(a.id!), tabIn(b.id!), 9999])).toEqual({
+      [tabIn(a.id!)]: a.id!,
+      [tabIn(b.id!)]: b.id!,
+    })
+  })
+
+  test("newWindow opens an unfocused window for the task without touching the setting or the agent window", async () => {
+    const user = await userWindow({ left: 0, top: 30, width: 600, height: 600 })
+    const { tab, rule, created } = await AgentWindow.open("https://example.com/", { newWindow: true })
+    expect(tab.windowId).not.toBe(user.id)
+    expect(created).toBe(true)
+    expect(rule).toBe("new-window")
+    expect(stub.state.created).toEqual([expect.objectContaining({ focused: false, type: "normal" })])
+    expect(stub.state.focusedWindowId).toBe(user.id)
+    expect(await AgentWindow.id()).toBeUndefined()
+    expect(await AgentWindow.placement()).toBe("current")
+  })
+
   test("an unknown stored value means the default", async () => {
     await stub.chrome.storage.local.set({ agentTabsWindow: "elsewhere" })
     expect(await AgentWindow.placement()).toBe("current")

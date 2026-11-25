@@ -164,6 +164,11 @@ export function createRelayCommands(deps: {
         const opened = await AgentWindow.open(url, {
           active,
           ...(AgentWindow.isPlacement(params?.window) ? { override: params.window } : {}),
+          ...(Array.isArray(params?.follow)
+            ? { follow: params.follow.filter((id): id is number => typeof id === "number") }
+            : {}),
+          ...(typeof params?.beside === "number" ? { beside: params.beside } : {}),
+          ...(params?.newWindow === true ? { newWindow: true } : {}),
         }).catch(async (error: unknown) => {
           await withTimeout(TabCleanup.endCreate(creating), deadline - Date.now())
           throw error
@@ -188,8 +193,21 @@ export function createRelayCommands(deps: {
         // The tab is tracked in memory; clearing the creation marker must not hold the answer past the budget.
         await withTimeout(TabCleanup.endCreate(creating), deadline - Date.now())
         if (url === "about:blank") await waitUntilLoaded(tab.id, deps.log, deadline)
-        return { tabId: tab.id }
+        // Where it went, so the agent knows its tabs' windows (and when a label spans several).
+        return {
+          tabId: tab.id,
+          windowId: tab.windowId,
+          rule: opened.rule,
+          ...(opened.windows ? { windows: [...opened.windows] } : {}),
+        }
       }
+      case "tabs.windows":
+        // The window each of an agent's tabs is in now. Only the tabs the relay names: nothing about other browsing.
+        return {
+          windows: await AgentWindow.windowsOf(
+            Array.isArray(params?.tabIds) ? params.tabIds.filter((id): id is number => typeof id === "number") : [],
+          ),
+        }
       case "tabs.remove":
         await TabCleanup.closeAgentTab(number(params, "tabId"))
         return {}

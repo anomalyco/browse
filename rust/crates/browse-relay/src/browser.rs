@@ -159,7 +159,7 @@ impl Relay {
             None => None,
         };
         let group = options.group.as_deref().and_then(crate::registry::clean_group);
-        Ok(TabOptions { group, allowed_origins, read_only: options.read_only, keep_visible: options.keep_visible, keep_open: options.keep_open, browser: options.browser.clone() })
+        Ok(TabOptions { group, allowed_origins, read_only: options.read_only, keep_visible: options.keep_visible, keep_open: options.keep_open, browser: options.browser.clone(), new_window: options.new_window, window_of: options.window_of.clone() })
     }
 
     /// Turns the idle-close exemption on or off for a tab, and tells the extension, which runs its own idle cleanup.

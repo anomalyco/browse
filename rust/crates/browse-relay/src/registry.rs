@@ -81,7 +81,7 @@ mod tests {
             target_id: "T7".into(),
             browser_key: "k1".into(),
             opener: Some(3),
-            options: TabOptions { group: Some("orw-x".into()), allowed_origins: Some(vec!["example.com".into()]), read_only: true, keep_visible: false, keep_open: false, browser: None },
+            options: TabOptions { group: Some("orw-x".into()), allowed_origins: Some(vec!["example.com".into()]), read_only: true, keep_visible: false, keep_open: false, browser: None, new_window: false, window_of: None },
             created_at: "now".into(),
             chosen: Some("work-mail".into()),
             lent: false,

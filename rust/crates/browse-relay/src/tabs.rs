@@ -15,7 +15,10 @@ use tokio::sync::broadcast;
 use crate::domain;
 use crate::guardrails::is_restricted_url;
 use crate::link::{Link, RpcError};
-use crate::protocol::CAPABILITY_TAB_RELEASE;
+use crate::protocol::{CAPABILITY_TAB_RELEASE, CAPABILITY_TAB_WINDOWS};
+
+/// Why newWindow and windowOf don't work in a directly driven browser.
+const DIRECT_WINDOWS: &str = "newWindow and windowOf work in browsers browse reaches through its extension, not in a directly driven one (Firefox); open the tab without them.";
 use crate::relay::{KnownOwner, Owner, Relay, Tab};
 use crate::rlog;
 use crate::util::short_url;
@@ -118,6 +121,26 @@ fn target_info(result: &Value) -> Option<(String, String, String, String)> {
 /// A URL that is a real document: not empty (nothing navigated yet) and not an about: page.
 pub(crate) fn real_url(url: &str) -> bool {
     !url.is_empty() && !url.starts_with("about:")
+}
+
+/// A browser's tabs to ask about: (relay id, the browser's own id).
+type LinkTabs = (Arc<Link>, Vec<(i64, i64)>);
+
+/// Where `tabs.create` puts a new tab, by precedence: a new window of its own (`newWindow`), the window of a tab the
+/// agent named (`beside`), else beside its label's tabs (`follow`), wherever the user moved them. The relay's window
+/// override (OPENCODE_BROWSER_AGENT_WINDOW) fixes placement, so it turns `follow` off. Without any of these the
+/// extension's window setting (or the override) decides.
+fn place(params: &mut Value, new_window: bool, beside: Option<i64>, follow: Vec<i64>, override_window: Option<&str>) {
+    if new_window {
+        params["newWindow"] = true.into();
+    } else if let Some(local) = beside {
+        params["beside"] = local.into();
+    } else if override_window.is_none() && !follow.is_empty() {
+        params["follow"] = follow.into();
+    }
+    if let Some(window) = override_window {
+        params["window"] = window.into();
+    }
 }
 
 impl Relay {
@@ -313,6 +336,51 @@ impl Relay {
         Ok(())
     }
 
+    /// The browser window each of `tabs` is in now, from extensions that can say (CAPABILITY_TAB_WINDOWS), by relay
+    /// tab id. A browser that doesn't answer in time leaves its tabs out.
+    pub async fn tab_windows(&self, tabs: &[i64]) -> HashMap<i64, i64> {
+        let mut by_link: HashMap<String, LinkTabs> = HashMap::new();
+        {
+            let st = self.st();
+            for &tab in tabs {
+                if let Some((link, local)) = st.browser_tab(tab)
+                    && link.supports(CAPABILITY_TAB_WINDOWS)
+                {
+                    by_link.entry(link.key.clone()).or_insert_with(|| (link.clone(), Vec::new())).1.push((tab, local));
+                }
+            }
+        }
+        let asks = by_link.into_values().map(|(link, tabs)| async move {
+            let locals: Vec<i64> = tabs.iter().map(|(_, local)| *local).collect();
+            let answer = tokio::time::timeout(Duration::from_secs(2), link.call("tabs.windows", json!({ "tabIds": locals }), None)).await;
+            let windows = match answer {
+                Ok(Ok(answer)) => answer.get("windows").cloned().unwrap_or_default(),
+                _ => Value::Null,
+            };
+            tabs.into_iter()
+                .filter_map(|(tab, local)| windows.get(local.to_string()).and_then(Value::as_i64).map(|window| (tab, window)))
+                .collect::<Vec<_>>()
+        });
+        futures_util::future::join_all(asks).await.into_iter().flatten().collect()
+    }
+
+    /// The browser's own ids of `link`'s open tabs labelled `group` (agent tabs and lent ones), for a new tab with that
+    /// label to open beside them.
+    fn label_tabs(&self, link: &Arc<Link>, group: Option<&str>) -> Vec<i64> {
+        let Some(group) = group else { return Vec::new() };
+        let st = self.st();
+        let mut ids: Vec<i64> = st
+            .tabs
+            .values()
+            .filter(|tab| !tab.closing && tab.options.group.as_deref() == Some(group))
+            .filter_map(|tab| st.browser_tab(tab.id))
+            .filter(|(owner, _)| owner.key == link.key)
+            .map(|(_, local)| local)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Opens a background agent tab, attaches it blank, then navigates (so the allowlist sees the real load). A tab
     /// an agent's page opens (`opener`) goes in the opener's browser. A `chosen` id is kept for the tab, so agents can
     /// use it as `tab` while the tab lives.
@@ -325,25 +393,68 @@ impl Relay {
         if let Some(refusal) = self.navigation_refusal(&options, None, "Target.createTarget", url).await {
             bail!(refusal);
         }
+        // One tab's request: the tab doesn't keep it, so its popups and later tabs don't open windows of their own.
+        let new_window = std::mem::take(&mut options.new_window);
+        let window_of = options.window_of.take();
+        if new_window && window_of.is_some() {
+            bail!("Give newWindow or windowOf, not both.");
+        }
+        let placed = new_window || window_of.is_some();
         let direct_opener = opener.and_then(|o| self.st().tabs.get(&o).and_then(|t| t.backend.direct().cloned()));
         if let Some(entry) = direct_opener {
             return self.create_tab_direct(entry, Some(url), &options, opener, chosen).await;
         }
-        let link = match opener.and_then(|o| self.st().browser_tab(o)) {
-            Some((link, _)) => link,
-            None => match self.target_for(options.browser.as_deref()).await? {
+        // windowOf names a tab: the new one goes in its browser, beside it.
+        let beside = match &window_of {
+            Some(named) => {
+                let tab = match browse_core::tab_argument(&json!(named))? {
+                    browse_core::TabArg::Id(tab) => tab,
+                    browse_core::TabArg::Chosen(chosen) => self.resolve_chosen_tab(&chosen)?,
+                };
+                if self.st().tabs.get(&tab).is_some_and(|t| t.backend.is_direct()) {
+                    bail!("{}", DIRECT_WINDOWS);
+                }
+                let known = self.st().tabs.get(&tab).is_some_and(|t| !t.closing);
+                let Some((link, local)) = self.st().browser_tab(tab).filter(|_| known) else {
+                    bail!("windowOf: tab {named} isn't one of your tabs or a lent one; `tabs` lists them.");
+                };
+                Some((link, local))
+            }
+            None => None,
+        };
+        let link = match (opener.and_then(|o| self.st().browser_tab(o)), &beside) {
+            (Some((link, _)), _) => link,
+            (None, Some((link, _))) => {
+                if let Some(wanted) = options.browser.as_deref()
+                    && self.st().link_by_name(wanted).is_none_or(|named| named.key != link.key)
+                {
+                    bail!("windowOf: tab {} is in another browser than {wanted}.", window_of.as_deref().unwrap_or_default());
+                }
+                link.clone()
+            }
+            (None, None) => match self.target_for(options.browser.as_deref()).await? {
                 crate::browser::BrowserRef::Extension(link) => link,
-                crate::browser::BrowserRef::Direct(entry) => return self.create_tab_direct(entry, Some(url), &options, opener, chosen).await,
+                crate::browser::BrowserRef::Direct(entry) => {
+                    if placed {
+                        bail!("{}", DIRECT_WINDOWS);
+                    }
+                    return self.create_tab_direct(entry, Some(url), &options, opener, chosen).await;
+                }
             },
         };
         options.browser = None;
+        let windows = link.supports(CAPABILITY_TAB_WINDOWS);
+        if placed && !windows {
+            bail!("The browse extension in {} is too old to choose a tab's window (newWindow, windowOf). Update it (chrome://extensions, Update), then try again; or open the tab without them.", link.name);
+        }
         let mut params = json!({ "url": "about:blank", "active": false });
         if options.keep_open {
             params["keepOpen"] = true.into();
         }
-        if let Some(window) = crate::settings::agent_window_override() {
-            params["window"] = window.into();
-        }
+        let override_window = crate::settings::agent_window_override();
+        // The label's tabs, for the new one to follow; not looked up when nothing would use them.
+        let follow = if new_window || beside.is_some() || !windows || override_window.is_some() { Vec::new() } else { self.label_tabs(&link, options.group.as_deref()) };
+        place(&mut params, new_window, beside.map(|(_, local)| local), follow, override_window);
         let created = self.ext_link(&link, "tabs.create", params).await?;
         let tab = created.get("tabId").and_then(Value::as_i64).context("tabs.create did not return a tabId")?;
         link.announced.lock().unwrap().insert(tab);
@@ -357,7 +468,16 @@ impl Relay {
             self.remove_tab(tab, Release { gone: true, ..Release::default() }, "attach-failed");
             return Err(error);
         }
-        rlog!("tab.created", tabId = tab, group = options.group.clone());
+        rlog!("tab.created", tabId = tab, group = options.group.clone(), window = created.get("windowId").and_then(Value::as_i64), rule = created.get("rule").and_then(Value::as_str).map(str::to_string));
+        if let (Some(group), Some(Value::Array(split))) = (options.group.as_deref(), created.get("windows"))
+            && split.len() > 1
+        {
+            let list = split.iter().filter_map(Value::as_i64).map(|w| w.to_string()).collect::<Vec<_>>().join(", ");
+            let into = created.get("windowId").and_then(Value::as_i64).map(|w| format!(" window {w}")).unwrap_or_default();
+            if let Some(entry) = self.st().tabs.get_mut(&tab) {
+                entry.add_warning(format!("Tabs labelled `{group}` are in several windows ({list}); this one opened in{into}, where the user used one last. If that may be wrong, ask the user which window to use, then open with windowOf set to a tab in it."));
+            }
+        }
         if url != "about:blank" {
             let events = self.st().tabs.get(&tab).map(|t| t.events.subscribe());
             let navigated = self.debugger(tab, None, "Page.navigate", json!({ "url": url }), Some(Duration::from_secs(30))).await;
@@ -1251,5 +1371,36 @@ fn lost_reason(reason: &str) -> &'static str {
 fn return_follow_up(relay: &Arc<Relay>, tab: i64, commands: Vec<(Option<String>, &'static str, Value)>) {
     for (session, method, params) in commands {
         relay.debugger_best_effort(tab, session, method, params);
+    }
+}
+
+#[cfg(test)]
+mod place_tests {
+    use super::place;
+    use serde_json::{Value, json};
+
+    fn placed(new_window: bool, beside: Option<i64>, follow: Vec<i64>, override_window: Option<&str>) -> Value {
+        let mut params = json!({});
+        place(&mut params, new_window, beside, follow, override_window);
+        params
+    }
+
+    #[test]
+    fn a_label_follows_its_tabs_whatever_the_setting_says() {
+        assert_eq!(placed(false, None, vec![3, 4], None), json!({ "follow": [3, 4] }));
+        assert_eq!(placed(false, None, Vec::new(), None), json!({}));
+    }
+
+    #[test]
+    fn the_relay_override_fixes_placement_so_labels_dont_follow() {
+        assert_eq!(placed(false, None, vec![3], Some("separate")), json!({ "window": "separate" }));
+        assert_eq!(placed(false, None, vec![3], Some("current")), json!({ "window": "current" }));
+    }
+
+    #[test]
+    fn an_explicit_window_wins_over_the_label() {
+        assert_eq!(placed(true, None, vec![3], None), json!({ "newWindow": true }));
+        assert_eq!(placed(false, Some(9), vec![3], None), json!({ "beside": 9 }));
+        assert_eq!(placed(false, Some(9), Vec::new(), Some("separate")), json!({ "beside": 9, "window": "separate" }));
     }
 }
