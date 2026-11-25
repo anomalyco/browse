@@ -27,6 +27,12 @@ const PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-
 const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const META_CLIENT: &str = "io.modelcontextprotocol/clientInfo";
 const META_SERVER: &str = "io.modelcontextprotocol/serverInfo";
+const META_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+/// The Skills extension (SEP-2640): a client that declares it gets browse's instructions as one skill instead of as
+/// `instructions`; every other client gets `instructions` and no skill.
+const SKILLS: &str = "io.modelcontextprotocol/skills";
+const SKILL_URI: &str = "skill://browse/SKILL.md";
+const SKILL_DESCRIPTION: &str = "How to drive the user's real browser with browse's tools: tabs, snapshot refs, verifying each step, handing logins to the user and closing tabs. Read it before using browse's tools.";
 
 #[derive(Default)]
 struct Running {
@@ -49,6 +55,7 @@ pub fn run() -> anyhow::Result<()> {
     let noted = Arc::new(AtomicBool::new(false));
     let mut client = String::new();
     let mut modern = false;
+    let mut skills = false;
     let mut line = String::new();
     let mut stdin = std::io::stdin().lock();
     loop {
@@ -82,6 +89,9 @@ pub fn run() -> anyhow::Result<()> {
             if meta.get(META_VERSION).and_then(Value::as_str) == Some(MODERN) || method == "server/discover" {
                 modern = true;
             }
+            if let Some(capabilities) = meta.get(META_CAPABILITIES) {
+                skills = declares_skills(capabilities);
+            }
         }
         match method {
             "initialize" => {
@@ -91,26 +101,33 @@ pub fn run() -> anyhow::Result<()> {
                 let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
                 let version = PROTOCOLS.iter().find(|v| **v == asked).unwrap_or(&PROTOCOLS[0]);
                 client = params.pointer("/clientInfo/name").and_then(Value::as_str).unwrap_or_default().to_string();
-                reply(&out, id, json!({
+                skills = params.get("capabilities").is_some_and(declares_skills);
+                let mut result = json!({
                     "protocolVersion": version,
-                    "capabilities": {"tools": {"listChanged": false}},
+                    "capabilities": capabilities(json!({"listChanged": false}), skills),
                     "serverInfo": {"name": "browse", "version": VERSION},
-                    "instructions": relay::instructions(&client),
-                }));
+                });
+                if !skills {
+                    result["instructions"] = json!(relay::instructions(&client));
+                }
+                reply(&out, id, result);
             }
             // The 2026-07-28 probe: this is what tells a client the server speaks the modern era, and what it lists
             // as the tools, instructions and capabilities a pooled connection gets.
             "server/discover" => {
                 modern = true;
-                reply(&out, id, json!({
+                let mut result = json!({
                     "resultType": "complete",
                     "supportedVersions": [MODERN, PROTOCOLS[0], PROTOCOLS[1], PROTOCOLS[2], PROTOCOLS[3]],
-                    "capabilities": {"tools": {}},
-                    "instructions": relay::instructions(&client),
+                    "capabilities": capabilities(json!({}), skills),
                     "ttlMs": 0,
                     "cacheScope": "private",
                     "_meta": { META_SERVER: {"name": "browse", "version": VERSION} },
-                }));
+                });
+                if !skills {
+                    result["instructions"] = json!(relay::instructions(&client));
+                }
+                reply(&out, id, result);
             }
             "ping" => reply(&out, id, if modern { json!({ "resultType": "complete" }) } else { json!({}) }),
             "tools/list" => {
@@ -147,7 +164,22 @@ pub fn run() -> anyhow::Result<()> {
                     running.idle.notify_all();
                 });
             }
-            "resources/list" => reply(&out, id, if modern { listed(json!({ "resources": [] })) } else { json!({ "resources": [] }) }),
+            "resources/list" => {
+                let resources = if skills { json!([{ "uri": SKILL_URI, "name": "browse", "description": SKILL_DESCRIPTION, "mimeType": "text/markdown" }]) } else { json!([]) };
+                reply(&out, id, if modern { listed(json!({ "resources": resources })) } else { json!({ "resources": resources }) });
+            }
+            "resources/read" => match params.get("uri").and_then(Value::as_str) {
+                Some(SKILL_URI) if skills => {
+                    let result = json!({ "contents": [{ "uri": SKILL_URI, "mimeType": "text/markdown", "text": skill_file(&client) }] });
+                    reply(&out, id, if modern { cached(result) } else { result });
+                }
+                uri => unknown(&out, id, uri),
+            },
+            "skills/list" if skills => reply(&out, id, listed(json!({ "skills": [skill_entry(&client)] }))),
+            "skills/get" if skills => match params.get("uri").and_then(Value::as_str) {
+                Some(SKILL_URI) => reply(&out, id, cached(json!({ "skill": skill_entry(&client) }))),
+                uri => unknown(&out, id, uri),
+            },
             "prompts/list" => reply(&out, id, if modern { listed(json!({ "prompts": [] })) } else { json!({ "prompts": [] }) }),
             _ => write(&out, &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("Method not found: {method}")}})),
         }
@@ -157,6 +189,47 @@ pub fn run() -> anyhow::Result<()> {
     let count = running.count.lock().unwrap();
     let _ = running.idle.wait_timeout_while(count, Duration::from_secs(2), |n| *n > 0);
     Ok(())
+}
+
+/// Whether a client's capabilities declare the Skills extension.
+fn declares_skills(capabilities: &Value) -> bool {
+    capabilities.get("extensions").and_then(|extensions| extensions.get(SKILLS)).is_some_and(|skills| !skills.is_null())
+}
+
+/// browse's capabilities: tools, plus for a client that loads skills, the resources its skill is read through and the
+/// extension.
+fn capabilities(tools: Value, skills: bool) -> Value {
+    if skills { json!({ "tools": tools, "resources": {}, "extensions": { SKILLS: {} } }) } else { json!({ "tools": tools }) }
+}
+
+/// The skill's SKILL.md: frontmatter, then the instructions this client would otherwise get.
+fn skill_file(client: &str) -> String {
+    format!("---\nname: browse\ndescription: {SKILL_DESCRIPTION}\n---\n\n{}\n", relay::instructions(client).trim_end())
+}
+
+fn skill_entry(client: &str) -> Value {
+    use sha2::{Digest, Sha256};
+    let file = skill_file(client);
+    let digest: String = Sha256::digest(file.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    json!({
+        "uri": SKILL_URI,
+        "frontmatter": { "name": "browse", "description": SKILL_DESCRIPTION },
+        "resources": [{ "uri": SKILL_URI, "digest": format!("sha256:{digest}"), "size": file.len() }],
+    })
+}
+
+/// The skill and resource methods' error for a URI browse doesn't serve.
+fn unknown(out: &Mutex<std::io::Stdout>, id: Value, uri: Option<&str>) {
+    let message = match uri {
+        Some(uri) => format!("Unknown resource: {uri}; browse serves {SKILL_URI}"),
+        None => "uri is required".to_string(),
+    };
+    write(out, &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": message}}));
+}
+
+/// A 2026-07-28 single-item result: `resultType` plus the cache hints.
+fn cached(value: Value) -> Value {
+    listed(value)
 }
 
 /// A 2026-07-28 list result: the era's `resultType` plus the cache hints its schema requires.
