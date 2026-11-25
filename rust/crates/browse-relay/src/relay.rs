@@ -950,7 +950,7 @@ pub const NAVIGATE_DETACHED: &str = "Navigation detached the debugger; the tab i
 pub fn navigate_detached_message(url: &str) -> String {
     let page = if url.is_empty() { String::new() } else { format!(", leaving it at {}", crate::util::short_url(url)) };
     format!(
-        "Chrome detached browse from the tab while it navigated{page}: another extension or Chrome itself probably blocked the page (a Chrome error page). Try another URL, or ask the user what blocks this one."
+        "Chrome detached browse from the tab while it navigated{page}: another extension or Chrome itself probably blocked the page (an extension's block page or a Chrome error page). Try another URL, or ask the user what blocks this one."
     )
 }
 
