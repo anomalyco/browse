@@ -299,15 +299,11 @@ async fn run_async(ctx: ToolContext, tools: Arc<HashMap<String, Arc<dyn Tool>>>,
                 .collect();
             Ok(json!({ "tool": name, "text": text, "images": images }))
         }
-        // `page.bringToFront()`: through the tab's Cdp, so TabCdp::send applies the relay's guardrails (the
-        // foreground switch and the tab's read-only option) before anything reaches Chrome.
+        // `page.bringToFront()`: through the browser's guarded path, so a refusal (a read-only tab, or the relay's
+        // foreground switch off) comes back here as an error the prelude reports as a warning.
         "foreground" => {
             let tab = tab_argument(&ctx, &payload).map_err(|e| format!("{e:#}"))?;
-            let cdp = ctx.browser.cdp(tab).await.map_err(|e| format!("{e:#}"))?;
-            cdp.send("Page.bringToFront", json!({}), None)
-                .await
-                .map(|_| Value::Null)
-                .map_err(|e| e.to_string())
+            ctx.browser.bring_to_front(tab).await.map(|_| Value::Null).map_err(|e| format!("{e:#}"))
         }
         "sleep" => {
             let ms = payload["ms"].as_f64().unwrap_or(0.0).clamp(0.0, 24.0 * 3600.0 * 1000.0);

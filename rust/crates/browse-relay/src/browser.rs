@@ -560,6 +560,13 @@ impl Browser for RelayBrowser {
         Ok(self.0.tab_infos())
     }
 
+    /// Through the tab's guarded CDP connection: Page.bringToFront is refused for a read-only tab and
+    /// unless OPENCODE_BROWSER_ALLOW_FOREGROUND=1 (guardrails.rs), so nothing reaches Chrome otherwise.
+    async fn bring_to_front(&self, tab: TabId) -> anyhow::Result<()> {
+        let cdp = self.cdp(tab).await?;
+        cdp.send("Page.bringToFront", json!({}), None).await.map(|_| ()).map_err(|error| anyhow!("{error}"))
+    }
+
     async fn close_tab(&self, tab: TabId) -> anyhow::Result<()> {
         self.0.await_tab(tab).await;
         self.0.usable_tab(tab)?;

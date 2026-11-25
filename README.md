@@ -344,7 +344,7 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
 | --- | --- |
 | `OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1` | Let tabs read and write every cookie in the profile |
 | `OPENCODE_BROWSER_ALLOW_ALL_STORAGE=1` | Let tabs use every site's storage, and load resources from any host with your credentials |
-| `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Let `page.bringToFront()` in `execute` raise the tab and its window |
+| `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Let `page.bringToFront()` in `execute` raise the tab and its window (off by default; `browse restart` after setting it) |
 | `OPENCODE_BROWSER_ALLOW_FILE_URLS=1` | Allow `file:` URLs |
 | `OPENCODE_BROWSER_FILE_ROOTS` | More folders tools may read and write (path-list separated) |
 | `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in yours), overriding the options page; labelled tabs no longer follow their label's window |
