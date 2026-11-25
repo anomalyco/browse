@@ -39,11 +39,11 @@ export function firstRunStep(state: AgentRelayState | undefined, probe: RelayPro
     case "untrusted":
       return { kind: "pair", reason: state.codeRejected ? "code-rejected" : "refused", unpacked, ...(remote ? { remote } : {}) }
     case "connecting":
-      return { kind: "connecting", pairing: state.pairing === "code", ...(remote ? { remote } : {}) }
+      return { kind: "connecting", pairing: state.pairing === "code" || state.pairing === "local", ...(remote ? { remote } : {}) }
     case "offline":
       if (state.codeRejected) return { kind: "pair", reason: "code-rejected", unpacked, ...(remote ? { remote } : {}) }
       if (state.pairing === "none") return { kind: "install" }
-      return { kind: "waiting", pairing: state.pairing, ...(remote ? { remote } : {}) }
+      return { kind: "waiting", pairing: state.pairing === "local" ? "code" : state.pairing, ...(remote ? { remote } : {}) }
     case "unpaired":
       if (state.codeRejected) return { kind: "pair", reason: "code-rejected", unpacked, ...(remote ? { remote } : {}) }
       // A relay on another computer was set on purpose; it needs a code from there.

@@ -40,7 +40,7 @@ import {
 import { unpackedExtensionId } from "../../cli/src/protocol"
 import { cliUpdateText, describeStatus } from "./describe"
 import { RelayForm } from "./relay-form"
-import { applyColorScheme, Brand, CopyBox, createRelay, createStored, Note, Rich } from "./ui"
+import { applyColorScheme, Brand, CopyBox, createPolicySetting, createRelay, Note, Rich } from "./ui"
 import "./settings.css"
 
 const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
@@ -49,18 +49,19 @@ function Settings() {
   const relay = createRelay()
   const state = relay.state
 
-  const [agentWindow, setAgentWindow] = createStored(AGENT_WINDOW_KEY, agentWindowPlacement)
-  const [grouping, setGrouping] = createStored(AGENT_GROUPING_KEY, agentGrouping)
-  const [collapse, setCollapse] = createStored(AGENT_GROUP_COLLAPSE_KEY, agentGroupCollapse)
-  const [idle, setIdle] = createStored(IDLE_MINUTES_KEY, idleMinutesSetting)
-  const [muted, setMuted] = createStored(MUTE_TABS_KEY, muteTabs)
-  const [human, setHuman] = createStored(HUMAN_INPUT_KEY, humanInput)
-  const [notifications, setNotifications] = createStored(HANDOFF_NOTIFICATIONS_KEY, handoffNotifications)
-  const [storedName] = createStored(BROWSER_NAME_KEY, (value) => (typeof value === "string" ? value : ""))
+  const [agentWindow, setAgentWindow, windowManaged] = createPolicySetting("window", AGENT_WINDOW_KEY, agentWindowPlacement)
+  const [grouping, setGrouping, groupingManaged] = createPolicySetting("grouping", AGENT_GROUPING_KEY, agentGrouping)
+  const [collapse, setCollapse, collapseManaged] = createPolicySetting("groupCollapse", AGENT_GROUP_COLLAPSE_KEY, agentGroupCollapse)
+  const [idle, setIdle, idleManaged] = createPolicySetting("idleMinutes", IDLE_MINUTES_KEY, idleMinutesSetting)
+  const [muted, setMuted, mutedManaged] = createPolicySetting("muteTabs", MUTE_TABS_KEY, muteTabs)
+  const [human, setHuman, humanManaged] = createPolicySetting("humanInput", HUMAN_INPUT_KEY, humanInput)
+  const [notifications, setNotifications, notificationsManaged] = createPolicySetting("handoffNotifications", HANDOFF_NOTIFICATIONS_KEY, handoffNotifications)
+  const [storedName, , nameManaged] = createPolicySetting("browserName", BROWSER_NAME_KEY, (value) => (typeof value === "string" ? value : ""))
 
   const [name, setName] = createSignal<string>()
   const saveName = (event: SubmitEvent) => {
     event.preventDefault()
+    if (nameManaged()) return
     const next = (name() ?? storedName()).trim().slice(0, 60)
     // The background reconnects on the change, and the relay names the browser afresh.
     void (next ? chrome.storage.local.set({ [BROWSER_NAME_KEY]: next }) : chrome.storage.local.remove(BROWSER_NAME_KEY)).then(() => {
@@ -149,19 +150,21 @@ function Settings() {
           >
             <form class="name-form" onSubmit={saveName}>
               <TextInput
-                value={name() ?? storedName()}
+                value={nameManaged() ? storedName() : (name() ?? storedName())}
                 onInput={(event) => setName(event.currentTarget.value)}
+                disabled={nameManaged()}
                 maxlength={60}
                 placeholder="Browser and computer"
                 aria-label="Name for agents"
                 autocomplete="off"
                 spellcheck={false}
               />
-              <Button type="submit" variant="neutral">
+              <Button type="submit" variant="neutral" disabled={nameManaged()}>
                 Save
               </Button>
             </form>
           </Row>
+          <PolicyNote managed={nameManaged()} />
         </Section>
 
         <Section title="agent tabs">
@@ -169,17 +172,20 @@ function Settings() {
             <SegmentedControl
               class="seg-window"
               value={agentWindow()}
+              disabled={windowManaged()}
               onChange={(value) => value && setAgentWindow(value as AgentWindowPlacement)}
             >
               <SegmentedControlItem value="current">Your window</SegmentedControlItem>
               <SegmentedControlItem value="separate">Own window</SegmentedControlItem>
             </SegmentedControl>
           </Row>
+          <PolicyNote managed={windowManaged()} />
           <Override overrides={state()?.overrides} setting="agentWindow" />
           <Row label="Group tabs" description="One shared group, or one per task (the group name an agent gives its tabs).">
             <SegmentedControl
               class="seg-group"
               value={grouping()}
+              disabled={groupingManaged()}
               onChange={(value) => value && setGrouping(value as AgentGrouping)}
             >
               <SegmentedControlItem value="shared">All agents</SegmentedControlItem>
@@ -187,6 +193,7 @@ function Settings() {
               <SegmentedControlItem value="none">None</SegmentedControlItem>
             </SegmentedControl>
           </Row>
+          <PolicyNote managed={groupingManaged()} />
           <Row
             label="Collapse agent groups"
             description="Folded away unless you're on one of their tabs (automatically), or left as you set them in the tab strip (never). A handoff still opens its group so you can find the tab."
@@ -194,31 +201,35 @@ function Settings() {
             <SegmentedControl
               class="seg-collapse"
               value={collapse()}
+              disabled={collapseManaged()}
               onChange={(value) => value && setCollapse(value as AgentGroupCollapse)}
             >
               <SegmentedControlItem value="auto">Automatically</SegmentedControlItem>
               <SegmentedControlItem value="off">Never</SegmentedControlItem>
             </SegmentedControl>
           </Row>
+          <PolicyNote managed={collapseManaged()} />
           <Row
             label="Close idle tabs after"
             description="Stays open while a script or recording runs, or a handoff waits."
           >
-            <SegmentedControl class="seg-idle" value={String(idle())} onChange={(value) => value !== null && setIdle(Number(value))}>
+            <SegmentedControl class="seg-idle" value={String(idle())} disabled={idleManaged()} onChange={(value) => value !== null && setIdle(Number(value))}>
               <SegmentedControlItem value="10">10 min</SegmentedControlItem>
               <SegmentedControlItem value="30">30 min</SegmentedControlItem>
               <SegmentedControlItem value="60">1 hour</SegmentedControlItem>
               <SegmentedControlItem value="0">Never</SegmentedControlItem>
             </SegmentedControl>
           </Row>
+          <PolicyNote managed={idleManaged()} />
           <Row
             label="Mute agent tabs"
             description="Silent when agents open them, so nothing plays from a tab you aren't looking at."
           >
-            <Switch hideLabel checked={muted() === "on"} onChange={(on) => setMuted(on ? "on" : "off")}>
+            <Switch hideLabel checked={muted() === "on"} disabled={mutedManaged()} onChange={(on) => setMuted(on ? "on" : "off")}>
               Mute agent tabs
             </Switch>
           </Row>
+          <PolicyNote managed={mutedManaged()} />
         </Section>
 
         <Section title="agent input">
@@ -226,10 +237,11 @@ function Settings() {
             label="Human-like input"
             description="Curved mouse paths, paced typing and scrolling. Off is faster, but easier for sites to flag as a bot."
           >
-            <Switch hideLabel checked={human() === "on"} onChange={(on) => setHuman(on ? "on" : "off")}>
+            <Switch hideLabel checked={human() === "on"} disabled={humanManaged()} onChange={(on) => setHuman(on ? "on" : "off")}>
               Human-like input
             </Switch>
           </Row>
+          <PolicyNote managed={humanManaged()} />
           <Override overrides={state()?.overrides} setting="humanInput" />
         </Section>
 
@@ -238,10 +250,11 @@ function Settings() {
             label="Notify me on every handoff"
             description="A system notification as well as the card on the page. Off: only on recorded tabs, where there's no card."
           >
-            <Switch hideLabel checked={notifications() === "always"} onChange={(on) => setNotifications(on ? "always" : "recording")}>
+            <Switch hideLabel checked={notifications() === "always"} disabled={notificationsManaged()} onChange={(on) => setNotifications(on ? "always" : "recording")}>
               Notify me on every handoff
             </Switch>
           </Row>
+          <PolicyNote managed={notificationsManaged()} />
         </Section>
 
         <Show when={selfUpdatingInstall(state()?.autoUpdate) && state()?.autoUpdate}>
@@ -415,6 +428,14 @@ const overrideNotes: { [Key in keyof RelayOverrides]-?: { variable: string; labe
   agentWindow: { variable: "OPENCODE_BROWSER_AGENT_WINDOW", labels: { current: "in your window", separate: "in a separate window" } },
   humanInput: { variable: "OPENCODE_BROWSER_HUMAN_INPUT", labels: { on: "on", off: "off" } },
 }
+function PolicyNote(props: { managed: boolean }) {
+  return (
+    <Show when={props.managed}>
+      <Note tone="neutral">Set by browser policy.</Note>
+    </Show>
+  )
+}
+
 function Override(props: { overrides: RelayOverrides | undefined; setting: keyof RelayOverrides }) {
   const value = () => props.overrides?.[props.setting]
   return (

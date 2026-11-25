@@ -302,6 +302,7 @@ export function createChrome() {
       onChanged,
       local: storageArea("local", onChanged),
       session: storageArea("session", onChanged),
+      managed: storageArea("managed", onChanged),
     }),
     notifications: lenient({
       async getPermissionLevel() {

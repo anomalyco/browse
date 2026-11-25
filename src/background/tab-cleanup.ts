@@ -1,5 +1,6 @@
 export * as TabCleanup from "./tab-cleanup"
-import { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY, idleMinutesSetting } from "../shared/protocol"
+import { readSetting } from "../shared/policy"
+import { DEFAULT_IDLE_MINUTES } from "../shared/protocol"
 import { ownedGroup, TIMED_OUT, withTimeout } from "./agent-relay/wire"
 import { serialQueue } from "./serial"
 
@@ -140,7 +141,7 @@ export function guard(check: (tabId: number) => boolean) {
 
 /** The setting: minutes before an untouched agent tab closes, 0 for never. */
 export async function idleMinutes() {
-  return idleMinutesSetting((await chrome.storage.local.get(IDLE_MINUTES_KEY))[IDLE_MINUTES_KEY])
+  return readSetting("idleMinutes")
 }
 
 /** Agent tabs close one at a time: two closes must not each see the other's tab and leave their window empty. */

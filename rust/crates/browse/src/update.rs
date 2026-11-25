@@ -76,10 +76,15 @@ impl Mode {
     }
 }
 
+/// Whether background update checks are explicitly disabled (e.g. Nix-managed installs).
+pub fn update_check_disabled() -> bool {
+    std::env::var("OPENCODE_BROWSER_UPDATE_CHECK").as_deref() == Ok("0")
+}
+
 /// OPENCODE_BROWSER_AUTO_UPDATE (or OPENCODE_BROWSER_UPDATE_CHECK=0) fixes the mode over the stored one.
 pub fn override_mode() -> Option<Mode> {
     std::env::var("OPENCODE_BROWSER_AUTO_UPDATE").ok().and_then(|v| Mode::parse(&v)).or_else(|| {
-        (std::env::var("OPENCODE_BROWSER_UPDATE_CHECK").as_deref() == Ok("0")).then_some(Mode::Off)
+        update_check_disabled().then_some(Mode::Off)
     })
 }
 
@@ -754,7 +759,9 @@ pub fn status_json() -> Value {
         let by = if std::env::var_os("OPENCODE_BROWSER_AUTO_UPDATE").is_some() { "OPENCODE_BROWSER_AUTO_UPDATE" } else { "OPENCODE_BROWSER_UPDATE_CHECK" };
         status["overriddenBy"] = json!(by);
     }
-    if let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| *l != VERSION) {
+    if !update_check_disabled()
+        && let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| *l != VERSION)
+    {
         status["latest"] = json!(latest);
     }
     for key in ["latestAt", "checkedAt"] {
@@ -865,7 +872,7 @@ impl Updater {
     }
 
     fn new(install: Install, idle: Arc<dyn Fn() -> bool + Send + Sync>) -> Option<(Updater, Worker)> {
-        if install == Install::Checkout {
+        if install == Install::Checkout || update_check_disabled() {
             return None;
         }
         // An install whose executable can't be found still checks in; it just doesn't install or restart.

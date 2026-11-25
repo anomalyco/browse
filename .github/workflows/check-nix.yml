@@ -1,0 +1,79 @@
+name: check-nix
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  nix-eval:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Nix
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+
+      - name: Evaluate flake outputs (all systems)
+        run: |
+          set -euo pipefail
+          nix --version
+
+          echo "=== Flake metadata ==="
+          nix flake metadata
+
+          echo ""
+          echo "=== Flake structure ==="
+          nix flake show --all-systems
+
+          SYSTEMS="x86_64-linux aarch64-linux aarch64-darwin"
+
+          echo ""
+          echo "=== Evaluating packages for all systems ==="
+          for system in $SYSTEMS; do
+            printf "  %s: " "$system"
+            if output=$(nix eval ".#packages.$system.browse.drvPath" --raw 2>&1); then
+              echo "✓"
+            else
+              echo "✗"
+              echo "::error::Evaluation failed for packages.$system.browse"
+              echo "$output"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "=== Evaluating devShells for all systems ==="
+          for system in $SYSTEMS; do
+            printf "  %s: " "$system"
+            if output=$(nix eval ".#devShells.$system.default.drvPath" --raw 2>&1); then
+              echo "✓"
+            else
+              echo "✗"
+              echo "::error::Evaluation failed for devShells.$system.default"
+              echo "$output"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "=== Checking NixOS module ==="
+          nix build ".#checks.x86_64-linux.modules" --no-link
+
+          echo ""
+          echo "=== All evaluations passed ==="

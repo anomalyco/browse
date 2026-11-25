@@ -5,6 +5,7 @@ import {
   extensionProtocolVersion,
 } from "../../../cli/src/protocol"
 import { defaultRelayPort, isJsonObject, relayPortHint, relayPorts } from "../../agent-relay/protocol"
+import { effectiveRelayAddress, readManaged } from "../../shared/policy"
 import {
   BROWSER_NAME_KEY,
   RELAY_ADDRESS_KEY,
@@ -92,6 +93,8 @@ export function createRelayHandshake(deps: {
   const handshakes = new WeakMap<WebSocket, Handshake>()
   /** The relay (`host:port`) that refused this browser's token since the worker started: a code goes first there. */
   let tokenRefused: string | undefined
+  /** The local relay (`host:port`) that refused policy auto-pairing since the worker started. */
+  let localPairRefused: string | undefined
   /** The relay refused the last code (wrong, used, expired, or too many tries). */
   let codeRejected = false
   /** This worker is removing a used code from storage: that change mustn't restart the connection. */
@@ -151,7 +154,7 @@ export function createRelayHandshake(deps: {
       RELAY_ADDRESS_KEY, PORT_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY, PROVEN_PORT_KEY,
       SPENT_KEY, PAIRING_KEY, TOKENS_KEY,
     ])
-    const target = relayTarget(stored)
+    const target = relayTarget({ ...stored, [RELAY_ADDRESS_KEY]: await effectiveRelayAddress(stored) })
     if (!target.automatic) return
     const file = await pairingFile()
     if (file?.code === undefined) return
@@ -196,6 +199,11 @@ export function createRelayHandshake(deps: {
     const token = local && automatic ? (loopbackToken(tokens) ?? own) : own
     const entered = normalizePairingCode(stored[PAIRING_KEY])
     const file = local ? await pairingFile() : undefined
+    const autoPair =
+      local &&
+      token === undefined &&
+      localPairRefused !== address &&
+      (await readManaged("autoPairLocalRelay")) === true
     const usable = (code: PairingCode | undefined, here: boolean) =>
       here && code !== undefined && !spent.has(code.code) && !(code.legacy && token !== undefined)
     const next: Credential | undefined =
@@ -204,6 +212,7 @@ export function createRelayHandshake(deps: {
       : token !== undefined && tokenRefused !== address ? { kind: "token", token }
       : usable(file?.code, !automatic || port === (file?.port ?? defaultRelayPort)) ?
         { kind: "code", code: file!.code!, source: "bundled" }
+      : autoPair ? { kind: "local" }
       : token !== undefined ? { kind: "token", token }
       : undefined
     const source: PairingSource = next?.kind ?? "none"
@@ -238,7 +247,7 @@ export function createRelayHandshake(deps: {
     if (!stored) await chrome.storage.local.set({ [PROFILE_KEY]: profile })
     const using = await credential()
     const name = await browserName()
-    const ecdh = using?.kind === "code" ? await ecdhKeyPair() : undefined
+    const ecdh = using?.kind === "code" || using?.kind === "local" ? await ecdhKeyPair() : undefined
     if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN) return
     if (using === undefined) return current.close(1000, "Not paired")
     const nonce = randomNonce()
@@ -257,8 +266,9 @@ export function createRelayHandshake(deps: {
         current.close(4006, "Relay did not pair")
       }
     }, CONNECT_TIMEOUT)
-    const mode = using.kind === "token" ? "token" : using.code.legacy ? "legacy" : "code"
+    const mode = using.kind === "token" ? "token" : using.kind === "local" ? "local" : using.code.legacy ? "legacy" : "code"
     if (using.kind === "code") deps.log.add("pairing.code", { source: using.source, legacy: using.code.legacy })
+    else if (using.kind === "local") deps.log.add("pairing.local")
     current.send(
       JSON.stringify({
         method: "hello",
@@ -364,8 +374,9 @@ export function createRelayHandshake(deps: {
           extensionKey: pending.ecdh.publicKey,
           relayKey: String(params?.ecdh),
         }
-        const key = await pairingSessionKey(await pairingCodeMaterial(using.code), secret, transcript)
-        if (!using.code.legacy) {
+        const material = using.kind === "local" ? "local" : await pairingCodeMaterial(using.code)
+        const key = await pairingSessionKey(material, secret, transcript)
+        if (using.kind === "code" && !using.code.legacy) {
           // Prove the code; the relay finds which of its pending codes it is and answers with auth.token.
           if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN) return
           pending.session = { key, relayNonce }
@@ -380,7 +391,13 @@ export function createRelayHandshake(deps: {
     if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN) return
     if (token === undefined) return refuse("no token")
     if (using.kind === "code") await adoptToken(token, using.code)
-    else await rememberToken(token)
+    else {
+      await rememberToken(token)
+      if (using.kind === "local") {
+        localPairRefused = undefined
+        deps.log.add("pairing.token", { local: true })
+      }
+    }
     if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN) return
     current.send(
       JSON.stringify({
@@ -403,6 +420,7 @@ export function createRelayHandshake(deps: {
       await chrome.storage.local.set({ [PROVEN_PORT_KEY]: pending.port })
     trusted.add(current)
     tokenRefused = undefined
+    localPairRefused = undefined
     codeRejected = false
     deps.log.add("pairing.ok", { source: using.kind })
     // Tabs an agent opened say so: a relay that can't match one to a session after a restart releases it rather
@@ -424,6 +442,7 @@ export function createRelayHandshake(deps: {
     if (used && !trusted.has(current) && code === 4006) {
       const { host, port } = deps.hostPort()
       if (used.kind === "token") tokenRefused = `${host}:${port}`
+      else if (used.kind === "local") localPairRefused = `${host}:${port}`
       else {
         codeRejected = true
         void spendCode(used.code.code).catch(() => undefined)
@@ -432,6 +451,13 @@ export function createRelayHandshake(deps: {
   }
 
   const onPairingStorageChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+    if (area === "managed") {
+      if (!("relayAddress" in changes || "browserName" in changes || "autoPairLocalRelay" in changes)) return
+      localPairRefused = undefined
+      deps.log.add("pairing.policy.changed")
+      deps.resetAndConnect("pairing", "Policy changed")
+      return
+    }
     if (area !== "local" || !(PAIRING_KEY in changes || RELAY_ADDRESS_KEY in changes || BROWSER_NAME_KEY in changes))
       return
     if (
@@ -525,6 +551,7 @@ export function createRelayHandshake(deps: {
     else {
       pairingFileRead = undefined
       tokenRefused = undefined
+      localPairRefused = undefined
       deps.resetAndConnect("user", "Checking the connection")
     }
     return { status: await outcome, address: deps.snapshot().relay.address }
@@ -567,6 +594,7 @@ export function createRelayHandshake(deps: {
     deps.log.add("reconnect.requested")
     pairingFileRead = undefined
     tokenRefused = undefined
+    localPairRefused = undefined
     deps.resetAndConnect("user")
   }
 

@@ -1,5 +1,5 @@
 export * as AgentWindow from "./window"
-import { AGENT_WINDOW_KEY as PLACEMENT_KEY } from "../../shared/protocol"
+import { readSetting } from "../../shared/policy"
 import { TabCleanup } from "../tab-cleanup"
 import { TIMED_OUT, withTimeout } from "./wire"
 
@@ -79,8 +79,7 @@ export function isPlacement(value: unknown): value is Placement {
 
 /** The status page's setting: "current" (the user's window, the default) or "separate". */
 export async function placement(): Promise<Placement> {
-  const stored = (await chrome.storage.local.get(PLACEMENT_KEY))[PLACEMENT_KEY]
-  return isPlacement(stored) ? stored : "current"
+  return readSetting("window")
 }
 
 /** The agent window's id, if it is still open. */
