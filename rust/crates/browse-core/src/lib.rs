@@ -290,7 +290,7 @@ pub fn valid_chosen_id(value: &str) -> bool {
 pub fn tab_schema() -> Value {
     serde_json::json!({
         "type": ["integer", "string"],
-        "description": "The tab to act on: the id navigate or tabs new returned (or a lent tab's id from tabs list), as a number or a string of digits, or a chosen id like `work-mail` given to tabs new."
+        "description": "Tab id (a number or digit string) from navigate or tabs, or a chosen id like `work-mail`."
     })
 }
 

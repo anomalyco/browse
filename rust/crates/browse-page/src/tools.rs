@@ -1775,7 +1775,8 @@ async fn webmcp_main_world(page: &Arc<TabPage>, frame: &str, method: &str, args:
 
 // Schemas and descriptions.
 
-const TARGET_DOC: &str = "Address elements by `ref` from the latest snapshot (\"e12\"; \"a5\" / \"f1a5\" from an aria snapshot) or by `selector`: CSS, or Playwright selectors such as `role=button[name=\"Save\"]`, `text=Sign in`, `label=Email`, `placeholder=Search`, `testid=submit`, chained with `>>` (`form >> role=button`, `>> nth=0`). Enter an iframe with `iframe[title=\"Pay\"] >> frame >> role=button[name=\"Pay\"]`.";
+const REF_DOC: &str = "Snapshot ref, e.g. \"e12\" (\"a5\" / \"f1a5\" from an aria snapshot).";
+const SELECTOR_DOC: &str = "CSS or Playwright selector, used when there is no ref: Playwright selectors such as `role=button[name=\"Save\"]`, `text=Sign in`, `label=Email`, `placeholder=Search`, `testid=submit`, chained with `>>` (`form >> role=button`, `>> nth=0`). Enter an iframe with `iframe[title=\"Pay\"] >> frame >> role=button[name=\"Pay\"]`. Must match exactly one element.";
 
 fn tab_prop() -> Value {
     browse_core::tab_schema()
@@ -1853,7 +1854,8 @@ fn click_schema() -> Value {
         "force": { "type": "boolean", "description": "Skip the visible/enabled/covered checks." },
         "timeout": { "type": "integer", "description": "Milliseconds to wait for the element (default 10000)." },
     })));
-    p.insert("ref".into(), json!({ "type": "string", "description": TARGET_DOC }));
+    p.insert("ref".into(), json!({ "type": "string", "description": REF_DOC }));
+    p.insert("selector".into(), json!({ "type": "string", "description": SELECTOR_DOC }));
     object(p, &[])
 }
 
@@ -1874,11 +1876,12 @@ fn fill_schema() -> Value {
         "value": { "type": "string" },
         "checked": { "type": "boolean", "description": "For a checkbox, radio or switch." },
         "fields": { "type": "array", "items": field, "description": "Several fields in order, instead of ref/selector + value." },
-        "submit": { "type": "boolean", "description": "Press Enter after filling." },
+        "submit": { "type": "boolean" },
         "force": { "type": "boolean", "description": "Skip the visible/enabled/editable wait and, for text fields, the covered check; checkboxes get the same checks as click." },
         "timeout": { "type": "integer" },
     })));
-    p.insert("ref".into(), json!({ "type": "string", "description": TARGET_DOC }));
+    p.insert("ref".into(), json!({ "type": "string", "description": REF_DOC }));
+    p.insert("selector".into(), json!({ "type": "string", "description": SELECTOR_DOC }));
     object(p, &[])
 }
 
@@ -1889,7 +1892,7 @@ fn type_schema() -> Value {
         target_props(props(json!({
             "text": { "type": "string" },
             "delay": { "type": "number", "description": "Extra milliseconds between keys." },
-            "submit": { "type": "boolean", "description": "Press Enter after typing." },
+            "submit": { "type": "boolean" },
             "timeout": { "type": "integer" },
         }))),
         &["text"],
