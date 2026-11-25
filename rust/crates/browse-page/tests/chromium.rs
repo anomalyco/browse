@@ -79,6 +79,16 @@ async fn snapshot_click_fill_and_refs() {
     let error = h.err("click", json!({ "selector": "input" })).await;
     assert!(error.contains("matches 3 elements"), "{error}");
 
+    // A selector that matches nothing lists what the page has instead, with snapshot refs.
+    let missing = h.err("click", json!({ "selector": "internal:role=textbox[name=/Emial/i]", "timeout": 300 })).await;
+    assert!(missing.contains(&format!("Closest elements in the page:\n  - textbox \"Email\" [ref={email}]")), "{missing}");
+    let missing = h.err("click", json!({ "selector": "role=slider", "timeout": 300 })).await;
+    assert!(missing.ends_with("The page has no slider."), "{missing}");
+    let missing = h.err("click", json!({ "selector": "role=link[name=\"Sav\"]", "timeout": 300 })).await;
+    assert!(missing.contains("Closest elements in the page:\n  - link \"Next page\""), "{missing}");
+    let missing = h.err("click", json!({ "selector": "role=menuitem[name=\"Sav\"]", "timeout": 300 })).await;
+    assert!(missing.contains(&format!("The page has no menuitem. Elements with a similar name:\n  - button \"Save\" [ref={save}]")), "{missing}");
+
     // A link click navigates; old refs are stale.
     let next = ref_of(&again, "link \"Next page\"");
     let result = h.json("click", json!({ "ref": next })).await;
