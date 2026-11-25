@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use browse_relay::ServeOptions;
 
-use crate::{VERSION, relay, update};
+use crate::{VERSION, browsers, relay, update};
 
 /// How long no agent may have used the browser before an update restarts the relay.
 const QUIET: Duration = Duration::from_secs(120);
@@ -44,6 +44,7 @@ pub fn run() -> anyhow::Result<i32> {
         version: VERSION.into(),
         build_id: BUILD_ID.into(),
         auto_update: Some(Arc::new(update::status_json)),
+        installed: Some(Arc::new(browsers::with_extension)),
         ..ServeOptions::default()
     };
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;

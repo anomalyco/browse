@@ -594,6 +594,8 @@ pub struct Relay {
     pub finished: AtomicBool,
     /// Where to look for Firefox-family apps for `nextStep`; None looks nowhere (tests).
     pub firefox: Option<crate::firefox::Discovery>,
+    /// The Chrome-family browsers here with browse enabled, to name a browser that only says it is Chrome.
+    pub installed: Option<InstalledBrowsers>,
     /// When the relay last tried to attach the recorded Firefox profiles.
     pub(crate) auto_attached: Mutex<Option<Instant>>,
     /// Driver keys of recorded profiles whose WebDriver BiDi session another client holds.
@@ -610,7 +612,13 @@ pub struct RelayConfig {
     pub auto_update: Option<AutoUpdateStatus>,
     /// Where to look for Firefox-family apps (`crate::firefox::Discovery::system()`); None looks nowhere.
     pub firefox: Option<crate::firefox::Discovery>,
+    /// The Chrome-family browsers here with browse enabled; None looks nowhere.
+    pub installed: Option<InstalledBrowsers>,
 }
+
+/// Names of the Chrome-family browsers on this computer with a profile that has browse enabled ("Google Chrome",
+/// "Helium"), from the `browse` binary's browser list.
+pub type InstalledBrowsers = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 /// The idle close setting's 10 minute default (src/shared/protocol.ts DEFAULT_IDLE_MINUTES): the idle time for tabs
 /// no browser setting covers.
@@ -688,6 +696,7 @@ impl Relay {
             heartbeat: AtomicU64::new(0),
             finished: AtomicBool::new(false),
             firefox: config.firefox,
+            installed: config.installed,
             auto_attached: Mutex::new(None),
             firefox_busy: Mutex::new(Vec::new()),
         }))

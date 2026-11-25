@@ -257,13 +257,16 @@ impl Handshake {
         Ok(())
     }
 
-    /// `computer`: the name of the computer the browser runs on, and whether it is only its address.
-    fn accept(&self, hello: &Value, key: String, computer: (String, bool)) -> Arc<Link> {
+    /// `computer`: the name of the computer the browser runs on, and whether it is only its address. `brand`: what the
+    /// relay makes of the browser the hello names (`local_brand`).
+    fn accept(&self, hello: &Value, key: String, computer: (String, bool), brand: Brand) -> Arc<Link> {
         let relay = &self.relay;
         let params = &hello["params"];
         let local = crate::origins::is_local_peer(&self.peer);
         let named: String = str_field(params, "name").map(str::trim).unwrap_or("").chars().take(60).collect();
-        let browser = str_field(params, "browser").map(str::trim).filter(|b| !b.is_empty()).unwrap_or("Browser");
+        let said = str_field(params, "browser").map(str::trim).filter(|b| !b.is_empty()).unwrap_or("Browser");
+        let previous = relay.st().known.get(&key).map(|known| known.name.clone());
+        let browser = browser_label(&brand, said, previous.as_deref(), &computer.0);
         let (name, fallback) = if named.is_empty() { (format!("{browser} on {}", computer.0), computer.1) } else { (named, false) };
         let capabilities: HashSet<String> = params["capabilities"]
             .as_array()
@@ -373,7 +376,8 @@ where
                             Some(lookup) => lookup.await.unwrap_or_else(|_| (peer.ip().to_string(), true)),
                             None => (peer.ip().to_string(), true),
                         };
-                        link = Some(handshake.accept(&hello, key, computer));
+                        let brand = local_brand(&relay, &peer, &hello).await;
+                        link = Some(handshake.accept(&hello, key, computer, brand));
                     }
                     Err(Closing(code, reason)) => {
                         let _ = out.send(close_frame(code, &reason));
@@ -433,6 +437,57 @@ async fn computer_name(peer: SocketAddr) -> (String, bool) {
             rlog!("extension.name_lookup_failed", address = ip.to_string());
             (ip.to_string(), true)
         }
+    }
+}
+
+/// What the relay makes of the browser a hello names (`local_brand`).
+#[derive(Debug, PartialEq)]
+pub(crate) enum Brand {
+    /// The hello's own word.
+    Hello,
+    /// This browser instead.
+    Is(String),
+    /// Can't tell (the lookup failed, or Helium and another browser that says "Chrome" both have browse): keep the
+    /// name this browser already had if it was Helium's, else the hello's word.
+    Unsure,
+}
+
+/// Helium tells extensions it is Google Chrome, on purpose, so a hello's "Chrome" may be Helium. For a browser on
+/// this computer with no name of its own, the browsers here with browse enabled settle it (`helium_among`).
+pub(crate) async fn local_brand(relay: &Relay, peer: &SocketAddr, hello: &Value) -> Brand {
+    let params = &hello["params"];
+    let named = str_field(params, "name").is_some_and(|name| !name.trim().is_empty());
+    if named || str_field(params, "browser").map(str::trim) != Some("Chrome") || !crate::origins::is_local_peer(peer) {
+        return Brand::Hello;
+    }
+    let Some(installed) = relay.installed.clone() else { return Brand::Hello };
+    match tokio::time::timeout(LOOKUP_TIMEOUT, tokio::task::spawn_blocking(move || installed())).await {
+        Ok(Ok(names)) => helium_among(&names),
+        _ => {
+            rlog!("extension.brand_lookup_failed");
+            Brand::Unsure
+        }
+    }
+}
+
+/// From the names of the browsers here with browse enabled: Helium when it's the only one that could say "Chrome".
+/// Only Helium is known to send Chrome's brand; Edge, Brave, Opera and Chromium send their own. A Chrome the list
+/// can't see (a custom profile folder, say) next to Helium is named Helium too; a name set in settings fixes that.
+pub(crate) fn helium_among(installed: &[String]) -> Brand {
+    const OWN_BRAND: [&str; 4] = ["Microsoft Edge", "Brave", "Opera", "Chromium"];
+    if !installed.iter().any(|name| name == "Helium") {
+        return Brand::Hello;
+    }
+    if installed.iter().all(|name| name == "Helium" || OWN_BRAND.contains(&name.as_str())) { Brand::Is("Helium".into()) } else { Brand::Unsure }
+}
+
+/// The browser half of "<browser> on <computer>": `previous` is the name this browser's key already has.
+pub(crate) fn browser_label<'a>(brand: &'a Brand, hello: &'a str, previous: Option<&str>, computer: &str) -> &'a str {
+    match brand {
+        Brand::Hello => hello,
+        Brand::Is(name) => name,
+        Brand::Unsure if previous == Some(format!("Helium on {computer}").as_str()) => "Helium",
+        Brand::Unsure => hello,
     }
 }
 

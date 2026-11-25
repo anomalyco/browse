@@ -51,6 +51,9 @@ pub struct ServeOptions {
     /// Where to look for Firefox-family apps, for `nextStep`. The default looks at this computer, except in this
     /// crate's tests and with OPENCODE_BROWSER_FIREFOX_DISCOVERY=0.
     pub firefox: Option<crate::firefox::Discovery>,
+    /// The Chrome-family browsers here with browse enabled, to name a local browser that says it is Chrome (Helium
+    /// does, on purpose). None: the extension's word is kept.
+    pub installed: Option<crate::relay::InstalledBrowsers>,
 }
 
 fn default_firefox() -> Option<crate::firefox::Discovery> {
@@ -68,6 +71,7 @@ impl Default for ServeOptions {
             auto_update: None,
             port_candidates: None,
             firefox: default_firefox(),
+            installed: None,
         }
     }
 }
@@ -183,6 +187,7 @@ pub async fn start(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::
         build_id: options.build_id.clone(),
         auto_update: options.auto_update.clone(),
         firefox: options.firefox.clone(),
+        installed: options.installed.clone(),
     })?;
     *relay.tools.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = tools;
     let state = RelayState { port: addr.port(), configured_port: configured, pid: std::process::id(), instance_id: relay.instance_id.clone(), started_at: relay.started_at.clone() };

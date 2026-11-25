@@ -15,7 +15,7 @@ const clicked = new Map<number, ReturnType<typeof setTimeout>>()
 type Blocked = "file" | "page"
 const MESSAGES: Record<Blocked, string> = {
   file: "browse can't use this file. Turn on “Allow access to file URLs” for browse on its details page in chrome://extensions, then click the toolbar button again.",
-  page: "browse can't use this page. Chrome doesn't let extensions control browser pages or the Chrome Web Store.",
+  page: "browse can't use this page. Browsers don't let extensions control their own pages or the extension store.",
 }
 
 /** Documents `chrome.debugger` refuses: browser internals, other extensions, and the Chrome Web Store. */

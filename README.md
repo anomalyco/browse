@@ -231,7 +231,11 @@ extension from your browser to finish.
   (`{ name, data }`): those always copy in and fit about 10 MB per call (the 50 MB limit is for paths copied in), and
   mixing them with paths copies the paths in too.
 - **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`); `status` lists them, and new
-  tabs open in the default browser unless `browser` names another.
+  tabs open in the default browser unless `browser` names another. The id comes from the browser's name, or the name
+  set in the extension's settings. Helium tells extensions it is Chrome, so a browser on this computer that says it is
+  Chrome is named Helium (`helium-macbook`) when Helium has browse and no other browser here that could say "Chrome"
+  does. When browse can't tell, a browser already named Helium keeps its name and id. A Chrome browse can't see (a
+  custom profile folder, say) next to Helium may be named Helium too: set a name for it in the extension's settings.
 - **Settings** (the extension's options page, applied right away): where agent tabs open (your window or their own),
   grouping (one shared group, one per task, or none), whether browse collapses agent groups by itself or leaves them
   as you set them (a handoff still opens its group so you can find the tab), when idle tabs close (10, 30, 60 minutes

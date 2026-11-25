@@ -124,6 +124,15 @@ pub fn detect(browsers: &[Browser]) -> Vec<Match> {
     found
 }
 
+/// The browsers here with a profile that has the extension enabled, for the relay to tell whether a hello saying
+/// "Chrome" came from Helium (which says it is Chrome).
+pub fn with_extension() -> Vec<String> {
+    let all = browsers();
+    let mut names: Vec<String> = detect(&all).into_iter().filter(|m| m.enabled).map(|m| all[m.browser].name.to_string()).collect();
+    names.dedup();
+    names
+}
+
 pub fn on_path(name: &str) -> Option<PathBuf> {
     let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ""] } else { &[""] };
     std::env::split_paths(&std::env::var_os("PATH")?)
