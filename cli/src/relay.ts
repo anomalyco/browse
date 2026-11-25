@@ -271,7 +271,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   const executeTimeoutMs = yield* configuredExecuteTimeoutMs
   const keepaliveIntervalMs = yield* Config.Int("OPENCODE_BROWSER_KEEPALIVE_MS").pipe(Config.withDefault(20_000))
-  const idleTabTtlMs = yield* Config.Int("OPENCODE_BROWSER_IDLE_TAB_TTL_MS").pipe(Config.withDefault(15 * 60_000))
+  const idleTabTtlMs = yield* Config.Int("OPENCODE_BROWSER_IDLE_TAB_TTL_MS").pipe(Config.withDefault(10 * 60_000))
   const journalBaseDir = defaultJournalBaseDir()
   // Tabs that received a device-metrics override; the execute end clears only these.
   const deviceMetricsOverrides = new DeviceMetricsOverrides()

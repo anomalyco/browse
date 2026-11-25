@@ -1960,9 +1960,9 @@ async fn idle_cleanup_follows_the_extension_setting() {
     assert!(!relay.st().tabs.contains_key(&tab));
 }
 
-/// The environment's idle time (OPENCODE_BROWSER_IDLE_TAB_TTL_MS, passed to `reap_idle` like the relay does) covers
-/// tabs no browser setting covers: 0 (`None`) never, and a time closes past it. An extension tab still follows its
-/// browser's idleMinutes setting.
+/// A direct TTL like the one from OPENCODE_BROWSER_IDLE_TAB_TTL_MS (passed to `reap_idle` the way the relay does)
+/// covers tabs no browser setting covers: 0 (`None`) never, and a time closes past it. An extension tab still follows
+/// its browser's idleMinutes setting.
 #[tokio::test]
 async fn environment_idle_time_covers_tabs_without_a_setting_only() {
     use self::drivers_tests::{FakeBrowser, register};
