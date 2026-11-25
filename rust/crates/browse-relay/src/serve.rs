@@ -804,9 +804,46 @@ pub(crate) async fn sweep_clients(relay: &Arc<Relay>) {
     }
 }
 
-/// Tabs no call used for the idle TTL: an agent's closes, a lent one goes back to the user.
-pub(crate) async fn reap_idle(relay: &Arc<Relay>, ttl: Duration) {
-    let idle: Vec<(i64, crate::relay::Owner)> = relay.idle_tabs(ttl);
+/// The shortest idle time the extension's idleMinutes setting offers: no extension tab is reaped sooner.
+const SHORTEST_IDLE_SETTING: Duration = Duration::from_secs(10 * 60);
+
+/// How long an extension tab may stay idle: the browser's idleMinutes setting (None for never). A browser that
+/// can't say (an extension too old for `settings.get`) gets the relay's `fallback`; one that isn't connected gets
+/// None, since its tabs can't be closed now anyway.
+async fn extension_idle_ttl(relay: &Arc<Relay>, link_key: &str, fallback: Option<Duration>) -> Option<Duration> {
+    let link = relay.st().link(link_key).filter(|l| l.connected())?;
+    match relay.ext_link(&link, "settings.get", Value::Null).await {
+        Ok(answer) => {
+            let settings = crate::settings::from_extension(&answer).ok()?;
+            let minutes = settings.iter().find(|(k, _)| k == "idleMinutes").and_then(|(_, v)| v.parse::<u64>().ok())?;
+            (minutes > 0).then(|| Duration::from_secs(minutes * 60))
+        }
+        Err(error) if error.to_string().contains("Invalid extension command") => fallback,
+        Err(_) => None,
+    }
+}
+
+/// Tabs no call used for their idle time: an agent's closes, a lent one goes back to the user. A tab in a browser
+/// the extension drives follows that browser's idleMinutes setting, so `never` leaves it open; a directly driven tab
+/// uses `direct_ttl` (OPENCODE_BROWSER_IDLE_TAB_TTL_MS, None for never).
+pub(crate) async fn reap_idle(relay: &Arc<Relay>, direct_ttl: Option<Duration>) {
+    let shortest = direct_ttl.map_or(SHORTEST_IDLE_SETTING, |ttl| ttl.min(SHORTEST_IDLE_SETTING));
+    let mut ttls: HashMap<String, Option<Duration>> = HashMap::new();
+    let mut idle = Vec::new();
+    for candidate in relay.idle_candidates().into_iter().filter(|c| c.idle >= shortest) {
+        let ttl = if relay.is_direct_tab(candidate.tab) {
+            direct_ttl
+        } else if let Some(ttl) = ttls.get(&candidate.link_key) {
+            *ttl
+        } else {
+            let ttl = extension_idle_ttl(relay, &candidate.link_key, direct_ttl).await;
+            ttls.insert(candidate.link_key.clone(), ttl);
+            ttl
+        };
+        if ttl.is_some_and(|ttl| candidate.idle >= ttl) {
+            idle.push((candidate.tab, candidate.owner));
+        }
+    }
     for (tab, owner) in idle {
         rlog!("tab.reaped", tabId = tab, owner = owner.name());
         if relay.is_direct_tab(tab) {
@@ -848,9 +885,9 @@ async fn housekeeping(relay: Arc<Relay>) {
                 });
             }
         }
-        if let Some(ttl) = relay.idle_tab_ttl.filter(|_| now - last_reap >= Duration::from_secs(60)) {
+        if now - last_reap >= Duration::from_secs(60) {
             last_reap = now;
-            reap_idle(&relay, ttl).await;
+            reap_idle(&relay, relay.idle_tab_ttl).await;
         }
         if now - last_orphans >= Duration::from_secs(5) {
             last_orphans = now;

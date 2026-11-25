@@ -338,6 +338,7 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
 | `OPENCODE_BROWSER_FILE_ROOTS` | More folders tools may read and write (path-list separated) |
 | `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in yours), overriding the options page |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed; overrides the options page |
+| `OPENCODE_BROWSER_IDLE_TAB_TTL_MS=900000` | When idle tabs close in a browser driven directly, without the extension (`0`: never). Extension tabs follow the options page's setting |
 | `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Only tell about new versions (`off`: check, but never install or tell; `on`: install them, the default) |
 | `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long to wait for a bot check the browser clears by itself |
 | `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS=30000` | How long the relay waits for the extension to answer a command |

@@ -20,6 +20,15 @@ pub enum BrowserRef {
     Direct(Arc<DriverEntry>),
 }
 
+/// A tab idle cleanup may close (`Relay::idle_candidates`).
+#[derive(Debug, Clone)]
+pub struct IdleCandidate {
+    pub tab: i64,
+    pub owner: Owner,
+    pub link_key: String,
+    pub idle: Duration,
+}
+
 /// How long a call waits for a browser that is reconnecting (a worker or relay restart) before failing.
 const RECONNECT_WAIT: Duration = Duration::from_secs(12);
 /// How long a just-started relay waits for the paired browser to dial back after a restart. A suspended service worker
@@ -324,11 +333,16 @@ impl Relay {
     /// Tabs idle cleanup may close: no call used them for `ttl`. A call, a handoff, a capture or a recording on a tab
     /// keeps it open, and so does `keepOpen`.
     pub fn idle_tabs(&self, ttl: Duration) -> Vec<(i64, Owner)> {
+        self.idle_candidates().into_iter().filter(|c| c.idle >= ttl).map(|c| (c.tab, c.owner)).collect()
+    }
+
+    /// Every tab idle cleanup may close, with how long no call used it and its browser's link.
+    pub fn idle_candidates(&self) -> Vec<IdleCandidate> {
         let st = self.st();
         st.tabs
             .values()
-            .filter(|t| !t.options.keep_open && !t.closing && !t.focused && t.last_used.elapsed() >= ttl && st.handoff_for_tab(t.id).is_none() && !st.tab_busy(t.id))
-            .map(|t| (t.id, t.owner))
+            .filter(|t| !t.options.keep_open && !t.closing && !t.focused && st.handoff_for_tab(t.id).is_none() && !st.tab_busy(t.id))
+            .map(|t| IdleCandidate { tab: t.id, owner: t.owner, link_key: t.link_key.clone(), idle: t.last_used.elapsed() })
             .collect()
     }
 

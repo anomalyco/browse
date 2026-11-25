@@ -375,7 +375,7 @@ async fn idle_cleanup_closes_a_direct_tab() {
     register(&relay, &fake).await;
     let info = h.handle.browser().open_tab(None, &TabOptions::default()).await.unwrap();
     relay.st().tabs.get_mut(&info.tab).unwrap().last_used = std::time::Instant::now() - Duration::from_secs(3_600);
-    crate::serve::reap_idle(&relay, Duration::from_secs(60)).await;
+    crate::serve::reap_idle(&relay, Some(Duration::from_secs(60))).await;
     assert_eq!(fake.closed(), fake.opened());
     assert!(!relay.st().tabs.contains_key(&info.tab));
     assert_eq!(relay.st().gone_tab(info.tab).unwrap().why, "it was idle, so browse closed it");

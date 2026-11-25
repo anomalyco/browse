@@ -155,6 +155,7 @@ fn fake_extension_with_urls(socket: Socket, next_tab: i64, urls: TargetUrls) -> 
         }
     });
     let record = seen.clone();
+    let settings = Mutex::new(json!({ "window": "current", "grouping": "shared", "groupCollapse": "auto", "idleMinutes": 10, "humanInput": "on", "muteTabs": "off", "handoffNotifications": "recording" }));
     tokio::spawn(async move {
         while let Some(Ok(message)) = stream.next().await {
             let Message::Text(text) = message else { continue };
@@ -171,7 +172,15 @@ fn fake_extension_with_urls(socket: Socket, next_tab: i64, urls: TargetUrls) -> 
                 "debugger.attach" => {
                     json!({})
                 }
-                "settings.get" | "settings.set" => json!({ "settings": { "window": "current", "grouping": "shared", "groupCollapse": "auto", "idleMinutes": 10, "humanInput": "on", "muteTabs": "off", "handoffNotifications": "recording" } }),
+                "settings.get" | "settings.set" => {
+                    let mut settings = settings.lock().unwrap();
+                    if let Some(values) = params["values"].as_object() {
+                        for (key, value) in values {
+                            settings[key] = value.clone();
+                        }
+                    }
+                    json!({ "settings": settings.clone() })
+                }
                 "debugger.sendCommand" => match params["method"].as_str().unwrap_or("") {
                     "Target.getTargetInfo" => {
                         let tab = params["tabId"].as_i64().unwrap();
@@ -1746,6 +1755,31 @@ async fn a_chosen_tab_closes_when_idle_like_any_other() {
     let closed = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "close", "tab": "work-mail", "idleMinutes": 0 })).await).unwrap());
     assert_eq!(closed["closed"], json!([named]), "{closed}");
     assert!(!relay.st().tabs.contains_key(&named));
+}
+
+/// The relay's own sweep follows the extension's idleMinutes, not the direct-browser TTL (#377).
+#[tokio::test]
+async fn idle_cleanup_follows_the_extension_setting() {
+    let (h, seen, _events) = connected("profile-idle-setting", 420).await;
+    let relay = h.handle.relay.clone();
+    let tab = h.handle.browser().open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let idle_for = |minutes: u64| relay.st().tabs.get_mut(&tab).unwrap().last_used = std::time::Instant::now() - Duration::from_secs(minutes * 60);
+    let direct = Some(Duration::from_secs(15 * 60));
+
+    tool(&relay, "settings", json!({ "set": { "idleMinutes": "never" } })).await;
+    idle_for(600);
+    crate::serve::reap_idle(&relay, direct).await;
+    assert!(seen.commands("tabs.remove").is_empty(), "never keeps the tab open");
+    assert!(relay.st().tabs.contains_key(&tab));
+
+    tool(&relay, "settings", json!({ "set": { "idleMinutes": 30 } })).await;
+    idle_for(16);
+    crate::serve::reap_idle(&relay, direct).await;
+    assert!(seen.commands("tabs.remove").is_empty(), "30 minutes outlasts the direct TTL");
+    idle_for(31);
+    crate::serve::reap_idle(&relay, direct).await;
+    assert_eq!(seen.commands("tabs.remove").len(), 1, "past the setting it closes");
+    assert!(!relay.st().tabs.contains_key(&tab));
 }
 
 #[tokio::test]
