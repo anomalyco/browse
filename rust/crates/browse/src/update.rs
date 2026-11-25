@@ -592,17 +592,55 @@ fn switch_hint(exe: &Path) -> String {
     format!("run `{} install` for the self-updating binary, or install it globally with one of {globals}", exe.display())
 }
 
-/// The value of `--mode`, if given. A `--mode` with no value is an error, not a manual update.
-fn mode_arg(args: &[String]) -> anyhow::Result<Option<Mode>> {
-    let Some(i) = args.iter().position(|a| a == "--mode") else { return Ok(None) };
-    let value = args.get(i + 1).context("--mode needs a value: on, notify or off")?;
-    Mode::parse(value).map(Some).context("--mode is on, notify or off")
+/// `browse update`'s arguments: `--check`, and `--mode` (or `--mode=`) with a mode.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Options {
+    check_only: bool,
+    mode: Option<Mode>,
 }
 
-/// `browse update [--check]`.
+/// Reads `browse update`'s arguments. Anything else is an error, before the command can check or install anything.
+fn parse(args: &[String]) -> anyhow::Result<Options> {
+    let mut options = Options::default();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        i += 1;
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+            _ => (arg, None),
+        };
+        match flag {
+            "--check" if inline.is_none() => options.check_only = true,
+            "--mode" => {
+                let value = match inline {
+                    Some(value) => value.to_owned(),
+                    None => {
+                        let value = args.get(i).filter(|value| !value.starts_with('-')).cloned().context("--mode needs a value: on, notify or off")?;
+                        i += 1;
+                        value
+                    }
+                };
+                let mode = Mode::parse(&value).with_context(|| format!("--mode is on, notify or off, not {value:?}"))?;
+                if let Some(given) = options.mode.filter(|given| *given != mode) {
+                    bail!("--mode is given twice, {} and {}; pick one", given.name(), mode.name());
+                }
+                options.mode = Some(mode);
+            }
+            _ if arg.starts_with('-') => bail!("Unknown option {arg} for update. Run `browse --help`."),
+            _ => bail!("Unknown argument {arg} for update. Run `browse --help`."),
+        }
+    }
+    if options.check_only && options.mode.is_some() {
+        bail!("--check and --mode don't go together; pick one");
+    }
+    Ok(options)
+}
+
+/// `browse update [--check] [--mode <on|notify|off>]`.
 pub fn command(args: &[String]) -> anyhow::Result<()> {
-    let check_only = args.iter().any(|a| a == "--check");
-    if let Some(mode) = mode_arg(args)? {
+    let Options { check_only, mode } = parse(args)?;
+    if let Some(mode) = mode {
         set_mode(mode)?;
         println!("Automatic updates: {}", describe_mode(mode));
         if let Some(fixed) = override_mode().filter(|m| *m != mode) {
@@ -1016,16 +1054,44 @@ fn record_failure(version: &str, error: &anyhow::Error) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Global, Install, Kind, Manager, Runner, dist_tag, package_wanted};
+    use super::{Global, Install, Kind, Manager, Mode, Options, Runner, dist_tag, package_wanted};
+
+    fn parse(words: &[&str]) -> anyhow::Result<Options> {
+        let args = words.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        super::parse(&args)
+    }
 
     #[test]
-    fn mode_without_a_value_is_an_error() {
-        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(super::mode_arg(&args(&[])).unwrap(), None);
-        assert_eq!(super::mode_arg(&args(&["--check"])).unwrap(), None);
-        assert_eq!(super::mode_arg(&args(&["--mode", "off"])).unwrap(), Some(super::Mode::Off));
-        assert!(super::mode_arg(&args(&["--mode"])).unwrap_err().to_string().contains("--mode needs a value"));
-        assert!(super::mode_arg(&args(&["--mode", "sometimes"])).is_err());
+    fn update_arguments_are_parsed_or_rejected() {
+        assert_eq!(parse(&[]).unwrap(), Options::default());
+        assert_eq!(parse(&["--check"]).unwrap(), Options { check_only: true, mode: None });
+        assert_eq!(parse(&["--mode", "off"]).unwrap(), Options { check_only: false, mode: Some(Mode::Off) });
+        assert_eq!(parse(&["--mode=notify"]).unwrap(), Options { check_only: false, mode: Some(Mode::Notify) });
+        assert_eq!(parse(&["--mode", "on", "--mode", "on"]).unwrap(), Options { check_only: false, mode: Some(Mode::On) });
+
+        let rejected = [
+            (&["--bogus"][..], "--bogus"),
+            (&["off"][..], "off"),
+            (&["--"][..], "--"),
+            (&["--check=1"][..], "--check=1"),
+            (&["--check", "--no-open"][..], "--no-open"),
+            (&["--mode", "off", "extra"][..], "extra"),
+            (&["-c"][..], "-c"),
+            (&["--mode"][..], "--mode needs a value: on, notify or off"),
+            (&["--mode", "--check"][..], "--mode needs a value: on, notify or off"),
+            (&["--mode="][..], "--mode is on, notify or off, not \"\""),
+            (&["--mode", "sometimes"][..], "--mode is on, notify or off, not \"sometimes\""),
+            (&["--mode", "on", "--mode", "off"][..], "--mode is given twice"),
+            (&["--check", "--mode=on"][..], "--check and --mode don't go together"),
+            (&["--mode=on", "--check"][..], "--check and --mode don't go together"),
+            (&["--mode", "on", "--check"][..], "--check and --mode don't go together"),
+            (&["--mode", "off", "--check"][..], "--check and --mode don't go together"),
+            (&["--check", "--mode", "on"][..], "--check and --mode don't go together"),
+        ];
+        for (words, expected) in rejected {
+            let message = parse(words).unwrap_err().to_string();
+            assert!(message.contains(expected), "{}: {message}", words.join(" "));
+        }
     }
 
     #[test]
