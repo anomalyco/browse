@@ -203,7 +203,7 @@ impl Host {
             if navigated && after.navigations.len() < 25 {
                 after.navigations.push(url);
             }
-            if matches!(tool.as_str(), "handoff" | "demonstrate") {
+            if matches!(tool.as_str(), "handoff" | "demonstrate" | "pick") {
                 after.handoffs += 1;
             }
             if let Some(tabs) = result.get("newTabs").and_then(Value::as_array) {
@@ -252,7 +252,7 @@ impl Host {
 }
 
 fn is_handoff(op: &str, payload: &Value) -> bool {
-    op == "tool" && matches!(payload["name"].as_str(), Some("handoff" | "demonstrate"))
+    op == "tool" && matches!(payload["name"].as_str(), Some("handoff" | "demonstrate" | "pick"))
 }
 
 /// The tab a tool payload names, a chosen id like `work-mail` included.
