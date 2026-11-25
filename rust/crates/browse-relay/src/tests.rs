@@ -1642,6 +1642,54 @@ async fn a_waiting_handoff_is_listed_with_its_message_and_clears_after() {
     assert!(entry(&listed, waiting).get("handoff").is_none(), "the handoff finished: {listed}");
 }
 
+/// POST /tabs/show (`browse show`) brings a tab with a handoff waiting to the front, and no other tab: the agent
+/// already asked for the user there, so it gives agents no new way to take the user's focus.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_tab_waiting_on_the_user_is_brought_to_the_front() {
+    let (h, seen, _events) = connected("profile-handoff-show", 320).await;
+    let relay = h.handle.relay.clone();
+    let port = h.handle.port();
+    let token = h.handle.token().to_string();
+    let browser = h.handle.browser();
+    let waiting = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let quiet = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let raised = || seen.cdp("Page.bringToFront").len();
+
+    let (status, none) = http(port, "POST", "/tabs/show", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, 404, "{none}");
+    assert!(none["error"].as_str().unwrap().contains("No tab is waiting"), "{none}");
+
+    let call = {
+        let relay = relay.clone();
+        tokio::spawn(async move { tool(&relay, "handoff", json!({ "message": "approve the payment", "tab": waiting, "timeoutSeconds": 30 })).await })
+    };
+    eventually("the handoff", || relay.st().handoffs.contains_key(&waiting)).await;
+
+    let (status, refused) = http(port, "POST", "/tabs/show", Some(&token), Some(json!({ "tab": quiet }))).await;
+    assert_eq!(status, 404, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("isn't waiting on you"), "{refused}");
+    assert_eq!(raised(), 0, "a tab with no handoff is never raised");
+
+    let (status, shown) = http(port, "POST", "/tabs/show", Some(&token), Some(json!({ "tab": waiting }))).await;
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(shown["tab"], waiting, "{shown}");
+    assert_eq!(shown["handoff"]["message"], "approve the payment", "{shown}");
+    let sent = seen.cdp("Page.bringToFront");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["params"]["tabId"], waiting, "the waiting tab: {sent:?}");
+
+    // With no tab named, the only one waiting.
+    let (status, only) = http(port, "POST", "/tabs/show", Some(&token), Some(json!({}))).await;
+    assert_eq!((status, &only["tab"]), (200, &json!(waiting)), "{only}");
+    assert_eq!(http(port, "POST", "/tabs/show", None, Some(json!({ "tab": waiting }))).await.0, 401);
+
+    relay.finish_handoff(waiting, "continued");
+    tokio::time::timeout(Duration::from_secs(5), call).await.unwrap().unwrap();
+    let (status, _) = http(port, "POST", "/tabs/show", Some(&token), Some(json!({ "tab": waiting }))).await;
+    assert_eq!(status, 404, "the handoff finished");
+    assert_eq!(raised(), 2);
+}
+
 #[tokio::test]
 async fn a_numeric_tab_id_sent_as_a_string_is_the_tab() {
     let (h, _seen, _events) = connected("profile-numeric-string", 350).await;

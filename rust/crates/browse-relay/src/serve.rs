@@ -548,6 +548,27 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
             let (status, value) = crate::drivers::disconnect(&relay, &body).await;
             json_response(status, &value)
         }
+        // `browse show`: the user brings a tab waiting on them to the front. Never an MCP tool; only a tab with a
+        // handoff waiting, so it gives an agent no way to take the user's focus.
+        ("POST", "/tabs/show") => {
+            let body = match parsed() {
+                Ok(body) => body,
+                Err(response) => return finish(*response),
+            };
+            let tab = match body.get("tab").filter(|value| !value.is_null()).map(browse_core::tab_argument) {
+                None => None,
+                Some(Ok(browse_core::TabArg::Id(tab))) => Some(tab),
+                Some(Ok(browse_core::TabArg::Chosen(name))) => match relay.resolve_chosen_tab(&name) {
+                    Ok(tab) => Some(tab),
+                    Err(error) => return finish(json_response(StatusCode::NOT_FOUND, &json!({ "error": format!("{error:#}") }))),
+                },
+                Some(Err(error)) => return finish(json_response(StatusCode::BAD_REQUEST, &json!({ "error": format!("{error:#}"), "code": "invalid-request" }))),
+            };
+            match relay.show_handoff_tab(tab).await {
+                Ok(shown) => json_response(StatusCode::OK, &shown),
+                Err((status, error)) => json_response(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST), &json!({ "error": error })),
+            }
+        }
         ("POST", "/shutdown") => {
             relay.stop();
             json_response(StatusCode::OK, &json!({ "stopping": true }))

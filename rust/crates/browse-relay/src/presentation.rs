@@ -419,6 +419,44 @@ impl Relay {
         self.refresh_presentation(tab, false);
     }
 
+    /// Brings a tab with a handoff waiting on the user to the front: the tab selected and its window raised, as a
+    /// click on browse's handoff notification does. `tab` None picks the only waiting one. Only a waiting handoff's
+    /// tab: the agent already asked for the user there, so this doesn't let an agent take the user's focus.
+    /// Errors are for the user, with an HTTP status (404 nothing waiting there, 409 more than one waiting, 422 a
+    /// tab browse can't raise).
+    pub async fn show_handoff_tab(self: &Arc<Self>, tab: Option<i64>) -> Result<Value, (u16, String)> {
+        let (tab, url, handoff) = {
+            let st = self.st();
+            let tab = match tab {
+                Some(tab) if st.handoffs.contains_key(&tab) => tab,
+                Some(tab) => return Err((404, format!("Tab {tab} isn't waiting on you: only a tab with a handoff waiting can be brought to the front"))),
+                None => {
+                    let mut waiting: Vec<i64> = st.handoffs.keys().copied().collect();
+                    waiting.sort_unstable();
+                    match waiting.as_slice() {
+                        [] => return Err((404, "No tab is waiting on you".into())),
+                        [tab] => *tab,
+                        tabs => {
+                            let list = tabs.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+                            return Err((409, format!("Tabs {list} are waiting on you; name one")));
+                        }
+                    }
+                }
+            };
+            let handoff = st.handoffs.get(&tab).map(Handoff::info);
+            (tab, st.tabs.get(&tab).map(|t| t.url.clone()).unwrap_or_default(), handoff)
+        };
+        if self.is_direct_tab(tab) {
+            return Err((422, format!("Tab {tab} is in a browser browse drives directly, which can't be brought to the front from here; switch to it in that browser")));
+        }
+        // The relay's own command, not an agent's: the guardrail on agents' Page.bringToFront doesn't apply.
+        if let Err(error) = self.debugger(tab, None, "Page.bringToFront", json!({}), Some(Duration::from_secs(5))).await {
+            return Err((502, format!("Couldn't bring tab {tab} to the front: {error}")));
+        }
+        rlog!("handoff.shown", tabId = tab);
+        Ok(json!({ "tab": tab, "url": url, "handoff": handoff }))
+    }
+
     /// The page's Continue button (`handoff.completed`): only the waiter named by its id and tab.
     pub fn complete_handoff(self: &Arc<Self>, tab: i64, id: &str) {
         let waiting = self.st().handoffs.get(&tab).is_some_and(|h| h.id == id);
