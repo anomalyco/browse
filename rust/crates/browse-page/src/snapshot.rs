@@ -33,6 +33,9 @@ pub struct Entry {
     pub parent_keys: Option<Vec<String>>,
     pub role: String,
     pub name: String,
+    /// `name` is a stand-in (the role, or "List" for a list), not the element's own, so the line shows none.
+    #[serde(default)]
+    pub unnamed: bool,
     pub identity_name: Option<String>,
     pub details: Option<String>,
     pub selector: Option<String>,
@@ -195,7 +198,11 @@ fn render_capture(capture: &Capture) -> RenderedCapture {
         .iter()
         .zip(&depths)
         .map(|(entry, depth)| RenderedEntry {
-            prefix: format!("{}- {} \"{}\"", "  ".repeat(*depth as usize), entry.role, escape_name(&entry.name)),
+            prefix: if entry.unnamed {
+                format!("{}- {}", "  ".repeat(*depth as usize), entry.role)
+            } else {
+                format!("{}- {} \"{}\"", "  ".repeat(*depth as usize), entry.role, escape_name(&entry.name))
+            },
             details: entry.details.clone(),
             selector: entry.selector.clone(),
             role: entry.selector.as_ref().map(|_| entry.selector_role.clone().unwrap_or_else(|| entry.role.clone())),
@@ -391,7 +398,8 @@ fn table_header(lines: &[String], index: usize) -> Option<usize> {
     }
     let depth = indent(line);
     let table = (0..index).rev().find(|&i| indent(&lines[i]) < depth)?;
-    if !lines[table].trim_start().starts_with("- table ") {
+    let table_line = lines[table].trim_start();
+    if table_line != "- table" && !table_line.starts_with("- table ") {
         return None;
     }
     let first = table + 1;
@@ -1163,6 +1171,8 @@ mod tests {
         .unwrap();
         let rendered = render_capture(&capture);
         assert_eq!(rendered.entries[0].prefix, "- list \"Items\"");
+        let unnamed: Capture = serde_json::from_value(json!({ "entries": [{ "depth": 0, "role": "link", "name": "link", "unnamed": true, "priority": 1 }] })).unwrap();
+        assert_eq!(render_capture(&unnamed).entries[0].prefix, "- link");
         assert_eq!(rendered.entries[1].prefix, "  - link \"One \\\"1\\\"\"");
         assert_eq!(rendered.entries[1].role.as_deref(), Some("link"));
         assert_eq!(rendered.entries[2].prefix, "    - button \"Go\"");
@@ -1187,7 +1197,7 @@ mod tests {
         let table = |wins: &str| {
             vec![
                 entry("- heading \"Teams\""),
-                entry("- table \"Table\""),
+                entry("- table"),
                 entry("  - row \"Team | Wins\""),
                 entry("  - row \"Islanders | 25\""),
                 entry(&format!("  - row \"Rangers | {wins}\"")),
