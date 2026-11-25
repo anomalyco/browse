@@ -266,7 +266,7 @@ async function cycle() {
     pending.assisted = true; pending.forcedAt = start; save()
     const note = `update stuck: expected ${pending.version}, installed ${s.installed || "none"}, running ${s.version ?? "none"}; matched zip: ${!!s.matched}`
     await check("update-stuck", async () => ({ status: "fail", note }), { tier: "upgrade", incident: note })
-    await check("forced-update", dir => command(dir, [binary, "update", "--no-open"], 8), { tier: "upgrade", regress: false })
+    await check("forced-update", dir => command(dir, [binary, "update"], 8), { tier: "upgrade", regress: false })
   } else if (once) {
     if (!s.matched) await check("released-extension", async () => ({ status: "fail", note: "expected connected release matching installed dev version" }))
     if (s.matched) await suite("short")
