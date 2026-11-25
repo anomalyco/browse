@@ -528,7 +528,7 @@ impl TabPolicy for RelayTabPolicy {
 pub struct RelayBrowser(pub Arc<Relay>);
 
 impl RelayBrowser {
-    /// Raw CDP handle for a tab (used by relay-internal CDP guardrail tests and `tab_driver`).
+    /// Raw CDP handle for a tab (used by relay-internal CDP guardrail tests, `tab_driver` and `bring_to_front`).
     pub async fn cdp(&self, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
         self.0.await_tab(tab).await;
         self.0.usable_tab(tab)?;

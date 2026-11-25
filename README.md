@@ -212,11 +212,11 @@ extension from your browser to finish.
   a task in a new background window (`newWindow`) or in the window of a tab it names (`windowOf`); neither changes
   your window setting. `OPENCODE_BROWSER_AGENT_WINDOW` fixes placement, so labels don't move tabs while it's set.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
-  you're looking at one (you can turn that off). Agents can't switch you to their tabs or bring a window to the front.
-  A relay started with `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` lets `page.bringToFront()` in `execute` raise the tab and
-  its window. Tabs nobody touches for 10 minutes close by themselves, or whatever idle close is set to below (never
-  while something runs on them). Closing agent tabs never quits the browser or leaves it without a window: browse
-  leaves a new tab (or window) behind when it would close the last one.
+  you're looking at one (you can turn that off). By default, agents can't switch you to their tabs or bring a window to
+  the front. A relay started with `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` lets `page.bringToFront()` in `execute` raise
+  the tab and its window. Tabs nobody touches for 10 minutes close by themselves, or whatever idle close is set to
+  below (never while something runs on them). Closing agent tabs never quits the browser or leaves it without a window:
+  browse leaves a new tab (or window) behind when it would close the last one.
 - **Relay restarts keep agent tabs.** The relay saves the tabs agents opened and their options, and takes them back
   when it starts again (after an update, say).
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
