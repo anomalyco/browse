@@ -17,6 +17,7 @@ mod remote;
 mod serve;
 mod session;
 mod setup;
+mod show;
 mod update;
 
 pub const VERSION: &str = match option_env!("BROWSE_VERSION") {
@@ -40,6 +41,7 @@ const COMMANDS: &[&str] = &[
     "disconnect",
     "update",
     "status",
+    "show",
     "runtime-switch",
     "tools",
 ];
@@ -91,6 +93,7 @@ RUNNING
   restart                     Restart the relay with this terminal's environment; agent tabs stay open
   mcp                         The MCP server agents run (stdio)
   tools                       List the browser tools
+  show [tab] [--json]         Bring a tab waiting on you (a handoff) to the front; with no tab, the only one waiting
   <tool> [value]... [--arg value]...
                               Call a tool. `browse navigate https://example.com` opens a tab and prints its id
                               (\"tab\"); pass it to the rest: `browse snapshot --tab 12`, `browse click e12 --tab 12`,
@@ -158,6 +161,7 @@ fn main() {
         "disconnect" => firefox::disconnect(rest),
         "update" => update::command(rest).map(|_| 0),
         "status" => setup::status(rest),
+        "show" => show::command(rest),
         // Run by the TypeScript browse's updater once it installed this build (legacy.rs).
         "runtime-switch" => legacy::runtime_switch(rest),
         "tools" => Ok(cli::list()),

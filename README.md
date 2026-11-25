@@ -351,6 +351,9 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
   and says what to do when the extension is missing, unpaired, closed or out of date. A tab waiting on you is marked
   `waiting on you: <message>`, and `browse status --json` or `browse tabs` gives the message and when the handoff
   started (`handoff.message`, `handoff.startedAt`). Agents get the same from the `status` and `tabs` tools.
+  `browse show <tab>` brings that tab to the front, as clicking browse's handoff notification does (with no tab, the
+  only one waiting; `--json` prints `{ tab, url, handoff }`). It only raises a tab with a handoff waiting on you, so
+  agents still can't take your focus with it.
 - After the relay restarts, the extension reconnects by itself within about half a minute; calls made in the meantime
   wait for it.
 - An agent says browse's tools are missing: restart the agent (or reload its MCP servers) after `browse install`.

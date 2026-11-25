@@ -306,6 +306,17 @@ pub fn drivers(action: &str, body: &Value) -> anyhow::Result<(u16, Value)> {
     Ok((response.status, serde_json::from_slice(&response.body).unwrap_or(Value::Null)))
 }
 
+/// `POST /tabs/show` on the running relay: brings a tab with a handoff waiting to the front (`tab` None: the only
+/// one). The HTTP status and the JSON answer, errors included. None when no relay is running: then nothing waits.
+pub fn show_tab(tab: Option<&str>) -> anyhow::Result<Option<(u16, Value)>> {
+    let Probe::Running(_) = probe() else { return Ok(None) };
+    let tab = tab.map(|tab| tab.parse::<i64>().map_or_else(|_| Value::from(tab), Value::from));
+    let bytes = serde_json::to_vec(&serde_json::json!({ "tab": tab }))?;
+    let response = send("POST", "/tabs/show", &[], Some(&bytes), Some(Duration::from_secs(15)))
+        .map_err(|error| anyhow!("the browse relay at {} failed: {error}", relay_api::endpoint()))?;
+    Ok(Some((response.status, serde_json::from_slice(&response.body).unwrap_or(Value::Null))))
+}
+
 /// Drops a revoked browser's connection right away.
 pub fn drop_browser(key: &str) {
     if let Probe::Running(_) = probe() {
