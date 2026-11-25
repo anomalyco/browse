@@ -1677,6 +1677,7 @@ impl TabDriver for CdpTabDriver {
             content_width: number(content, "width").unwrap_or(width),
             content_height: number(content, "height").unwrap_or(height),
             device_pixel_ratio: (device_pixel_ratio * 1000.0).round() / 1000.0,
+            page_zoom: if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 },
         })
     }
 
