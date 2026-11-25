@@ -1238,6 +1238,8 @@ impl TabDriver for BiDiTabDriver {
             content_width: number(6).filter(|w| *w > 0.0).unwrap_or(width),
             content_height: number(7).filter(|h| *h > 0.0).unwrap_or(height),
             device_pixel_ratio: number(8).filter(|d| *d > 0.0).unwrap_or(1.0),
+            // BiDi clips are in CSS pixels, and devicePixelRatio already includes the zoom.
+            page_zoom: 1.0,
         })
     }
 

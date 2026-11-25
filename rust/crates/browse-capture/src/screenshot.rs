@@ -203,16 +203,27 @@ async fn capture(
 ) -> anyhow::Result<Shot> {
     let viewport = page::viewport(driver).await?;
     let dpr = viewport.device_pixel_ratio;
-    let mut clip_scale = if css_scale { 1.0 / dpr } else { 1.0 };
+    // Regions are in CSS pixels; the clip is in device-independent pixels, which page zoom makes larger.
+    let zoom = viewport.page_zoom;
+    let mut clip_scale = if css_scale { 1.0 / (dpr * zoom) } else { 1.0 };
     // The viewport's own clip keeps its size, so screenshot_diff baselines of the same viewport still match.
-    let viewport_rect = (viewport.page_x.round(), viewport.page_y.round(), viewport.width.round(), viewport.height.round());
+    let viewport_rect = (
+        (viewport.page_x * zoom).round(),
+        (viewport.page_y * zoom).round(),
+        (viewport.width * zoom).round(),
+        (viewport.height * zoom).round(),
+    );
     let (x, y, width, height, beyond) = match region {
         Region::Viewport => (viewport_rect.0, viewport_rect.1, viewport_rect.2, viewport_rect.3, false),
         Region::FullPage => {
             let (width, height) = (viewport.content_width.max(1.0), viewport.content_height.max(1.0));
-            (0.0, 0.0, width, height, outside(&viewport, (-viewport.page_x, -viewport.page_y, width, height)))
+            let beyond = outside(&viewport, (-viewport.page_x, -viewport.page_y, width, height));
+            (0.0, 0.0, width * zoom, height * zoom, beyond)
         }
-        Region::Clip(x, y, w, h) => (viewport.page_x + x, viewport.page_y + y, *w, *h, outside(&viewport, (*x, *y, *w, *h))),
+        Region::Clip(x, y, w, h) => {
+            let beyond = outside(&viewport, (*x, *y, *w, *h));
+            ((viewport.page_x + x) * zoom, (viewport.page_y + y) * zoom, w * zoom, h * zoom, beyond)
+        }
         Region::Element { .. } => bail_user!("resolve the element first"),
     };
     let (x, y, width, height) = whole_clip((x, y, width, height));
@@ -256,7 +267,7 @@ async fn capture(
         format: image.format,
         width: image_width,
         height: image_height,
-        scale: image_width as f64 / width,
+        scale: image_width as f64 * zoom / width,
         note,
     })
 }
@@ -680,6 +691,42 @@ mod tests {
         assert_eq!(clip, (30.0, 131.0, 100.0, 50.0));
         assert_whole(&params);
         assert_eq!(params["clip"]["scale"], json!(0.5), "{params}");
+    }
+
+    #[tokio::test]
+    async fn page_zoom_converts_clips_to_device_independent_pixels() {
+        // 125% page zoom on a 2x screen: 960x400 CSS pixels fill 1200x500 DIP (2400 device pixels wide).
+        let cdp = fake();
+        cdp.reply(
+            "Page.getLayoutMetrics",
+            json!({
+                "cssVisualViewport": { "pageX": 0.0, "pageY": 100.0, "clientWidth": 960.0, "clientHeight": 400.0, "zoom": 1.25 },
+                "visualViewport": { "clientWidth": 2400.0 },
+                "cssContentSize": { "width": 960.0, "height": 3000.0 },
+            }),
+        );
+        let driver = driver_of(&cdp);
+        capture(driver.as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 125.0, 1200.0, 500.0));
+        assert_eq!(params["clip"]["scale"], json!(0.4), "{params}");
+
+        capture(driver.as_ref(), &Region::Viewport, Format::Png, None, false, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 125.0, 1200.0, 500.0));
+        assert_eq!(params["clip"]["scale"], json!(1.0), "{params}");
+
+        let shot = capture(driver.as_ref(), &Region::Clip(40.0, 40.0, 80.0, 40.0), Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (50.0, 175.0, 100.0, 50.0));
+        assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
+        // The fake returns a 1x1 image for an 80 CSS pixel wide clip.
+        assert_eq!(shot.scale, 1.0 / 80.0);
+
+        capture(driver.as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1200.0, 3750.0));
+        assert_eq!(params["captureBeyondViewport"], json!(true), "{params}");
     }
 
     #[tokio::test]

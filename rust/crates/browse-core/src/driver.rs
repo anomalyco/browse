@@ -525,6 +525,9 @@ pub struct Viewport {
     pub content_width: f64,
     pub content_height: f64,
     pub device_pixel_ratio: f64,
+    /// Browser page zoom: device-independent pixels per CSS pixel, apart from the screen's scale. Screenshot clips
+    /// are in device-independent pixels, so a zoomed page's CSS rects are multiplied by it.
+    pub page_zoom: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
