@@ -204,7 +204,8 @@ extension from your browser to finish.
   The id lasts while the tab stays open: a relay restart or extension reload keeps it, and a browser restart loses it
   (opening that id again is a fresh tab). `tabs` lists each tab's id, url, title, group, last use, whether a call is
   running in it, the browser window it's in, and a waiting handoff's message. A tab opened with `keepOpen: true` stays
-  until an agent or you close it; every other tab closes when idle like the rest.
+  until an agent or you close it; every other tab closes when idle like the rest. `keepOpen` needs extension 0.1.2 or
+  newer: an older one can't hold a tab open, so it still closes when idle and browse tells the agent.
 - **A task keeps to its window.** A new tab with a `group` label opens in the window where that label's tabs are, in
   either window setting, so if you move a task's tabs to a window of their own, its next tabs open there too (when
   they're split across windows, the one you used last; the agent is told so it can ask you). An agent can also open

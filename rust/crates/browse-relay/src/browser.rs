@@ -163,7 +163,7 @@ impl Relay {
     }
 
     /// Turns the idle-close exemption on or off for a tab, and tells the extension, which runs its own idle cleanup.
-    /// Returns whether the option changed.
+    /// An extension that can't hold a tab yet gets a warning on the tab instead. Returns whether the option changed.
     pub fn set_keep_open(self: &Arc<Self>, tab: i64, keep_open: bool) -> bool {
         let changed = {
             let mut st = self.st();
@@ -176,7 +176,14 @@ impl Relay {
             }
         };
         if changed {
-            self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
+            let link = self.st().browser_tab(tab).map(|(link, _)| link);
+            match link {
+                Some(link) if link.keeps_open() => {
+                    self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
+                }
+                Some(link) if keep_open => self.warn_keep_open_unavailable(tab, &link),
+                _ => {}
+            }
             self.schedule_persist();
         }
         changed
@@ -236,6 +243,16 @@ impl Relay {
             return Ok(BrowserRef::Extension(link.clone()));
         }
         direct(&st).map(BrowserRef::Direct).ok_or_else(|| anyhow!("No browser is connected. Open the browser with the browse extension."))
+    }
+
+    /// Says a keepOpen tab still closes when idle: the connected extension runs its own idle cleanup and can't hold
+    /// one back.
+    pub fn warn_keep_open_unavailable(&self, tab: i64, link: &Link) {
+        let version = link.version.as_deref().map(|v| format!(" ({v})")).unwrap_or_default();
+        let warning = format!("The connected browse extension{version} can't keep tabs open yet, so this tab still closes when idle. Update the extension to 0.1.2 or newer to keep it open.");
+        if let Some(entry) = self.st().tabs.get_mut(&tab) {
+            entry.add_warning(warning);
+        }
     }
 
     /// The browser to open a tab in: the one named (waiting briefly while it reconnects), else the first connected.

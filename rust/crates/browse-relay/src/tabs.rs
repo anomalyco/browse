@@ -49,6 +49,9 @@ pub struct Attach {
     pub reclaim_held: bool,
     /// Look up who owned the tab before (a reconnect, a relay restart). A user's lend restores nothing.
     pub restore: bool,
+    /// A tab that was already an agent tab (a reconnect, a renewed debugger, a relay reclaiming it): the agent was
+    /// already told about its keepOpen, so attaching it again must not warn about it.
+    pub reattached: bool,
     /// Register the tab fresh (an opened popup): a disallowed first document closes it rather than blanking it.
     pub fresh_popup: bool,
     /// Only this page: a tab id that now shows another page (the browser restarted) is let go again.
@@ -70,6 +73,7 @@ impl Attach {
             already_attached: false,
             reclaim_held: false,
             restore: false,
+            reattached: false,
             fresh_popup: false,
             expect_target: None,
             timeout: ATTACH_TIMEOUT,
@@ -85,6 +89,7 @@ impl Attach {
         attach.created_at = Some(tab.created_at.clone());
         attach.chosen = tab.chosen.clone();
         attach.fresh_popup = tab.fresh_popup;
+        attach.reattached = true;
         attach
     }
 }
@@ -245,8 +250,17 @@ impl Relay {
         }
         self.schedule_persist();
         self.ext_best_effort(tab, "action.setAttached", json!({ "attached": true }));
-        // The extension runs its own idle cleanup, so it needs the same exemption the relay has.
-        self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
+        // The extension runs its own idle cleanup, so it needs the same exemption the relay has. Always send the
+        // current value to an extension that knows keep-open: it keeps the flag per tracked tab, and a tab it released
+        // stays tracked, so a stale true would otherwise never be cleared (sending false is harmless when untracked).
+        // An extension that can't hold a tab gets a warning instead: the tab still opens, and only the relay keeps it.
+        // The warning is for a tab the agent just opened: an attach that reattaches an existing tab (a reconnect, a
+        // renewed debugger, a relay restart reclaiming it) must not tell it again.
+        if link.keeps_open() {
+            self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
+        } else if keep_open && !attach.reattached {
+            self.warn_keep_open_unavailable(tab, &link);
+        }
         self.refresh_presentation(tab, true);
         rlog!("target.attached", tabId = tab, owner = owner.name());
         Ok(tab)
@@ -448,7 +462,7 @@ impl Relay {
             bail!("The browse extension in {} is too old to choose a tab's window (newWindow, windowOf). Update it (chrome://extensions, Update), then try again; or open the tab without them.", link.name);
         }
         let mut params = json!({ "url": "about:blank", "active": false });
-        if options.keep_open {
+        if options.keep_open && link.keeps_open() {
             params["keepOpen"] = true.into();
         }
         let override_window = crate::settings::agent_window_override();
@@ -713,6 +727,7 @@ impl Relay {
             attach.already_attached = true;
             attach.reclaim_held = agent;
             attach.restore = true;
+            attach.reattached = true;
             attach.timeout = INVENTORY_TIMEOUT;
             for attempt in 0..3 {
                 match relay.setup_tab(attach.clone()).await {
@@ -826,6 +841,8 @@ impl Relay {
                 attach.created_at = Some(known.created_at);
                 attach.chosen = known.chosen;
                 attach.expect_target = Some(target.clone());
+                // This is the tab as it was, not a new one: a keepOpen warning already reached the agent.
+                attach.reattached = true;
                 match relay.setup_tab(attach).await {
                     Ok(_) => rlog!("extension.reconnect.reattached", tabId = tab),
                     Err(error) => rlog!("extension.reconnect.lost", tabId = tab, target = target, error = error.to_string()),

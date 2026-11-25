@@ -7,7 +7,27 @@ pub const MIN_EXTENSION_PROTOCOL_VERSION: i64 = 3;
 pub const CAPABILITY_TAB_RELEASE: &str = "tab-release";
 /// The extension places a new tab by `newWindow`, `beside` and `follow`, and answers `tabs.windows`.
 pub const CAPABILITY_TAB_WINDOWS: &str = "tab-windows";
+pub const CAPABILITY_KEEP_OPEN: &str = "keep-open";
 pub const PAIRING_SCHEME: &str = "opencode-browser-pairing-v3";
+
+/// The extension version that started handling keep-open without announcing it: 0.1.2 through 0.1.5 handle
+/// `tabs.keepOpen` and `keepOpen` on `tabs.create`, but their hello only lists `tab-release`.
+pub const KEEP_OPEN_SINCE: [u64; 3] = [0, 1, 2];
+
+/// Whether an extension version handles keep-open on its own, without the `keep-open` capability. A pre-release
+/// (`0.1.6-dev.57`) counts as its base version, and Chrome's manifest may add a fourth part (`0.1.6.57`); a missing
+/// version or one that isn't numbers and dots is not capable.
+pub fn version_keeps_open(version: &str) -> bool {
+    let base = version.trim().split(['-', '+']).next().unwrap_or("");
+    let mut numbers = [0u64; 3];
+    for (index, part) in base.split('.').enumerate() {
+        let Ok(value) = part.trim().parse::<u64>() else { return false };
+        if let Some(number) = numbers.get_mut(index) {
+            *number = value;
+        }
+    }
+    numbers >= KEEP_OPEN_SINCE
+}
 
 pub const UNPACKED_EXTENSION_ID: &str = "afeafocngkodbmaipcngoamamfmekgfo";
 pub const PUBLIC_STORE_ID: &str = "mfnicocicmmlkpjnaffgihfjhdgjkdjg";

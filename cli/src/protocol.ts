@@ -10,6 +10,8 @@ export const extensionProtocolVersion = 3
 export const extensionCapabilityTabRelease = "tab-release"
 /** The extension places a new tab by `newWindow`, `beside` and `follow`, and answers `tabs.windows`. */
 export const extensionCapabilityTabWindows = "tab-windows"
+/** The extension can hold a tab past its own idle cleanup (`tabs.keepOpen`, `keepOpen` on `tabs.create`). */
+export const extensionCapabilityKeepOpen = "keep-open"
 /**
  * The oldest extension protocol this relay still speaks. The store extension and the npm package update on their own
  * schedules, so a relay keeps accepting older extensions for a while: raise this only when dropping support for them,
@@ -138,6 +140,7 @@ const extensionCommandMethodValues = [
   "debugger.sendCommand",
   "tabs.create",
   "tabs.remove",
+  "tabs.keepOpen",
   "tabs.group",
   "tabs.ungroup",
   "action.setAttached",
