@@ -366,6 +366,10 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
   the code in the extension's options.
 - An agent says browse was updated and its MCP server must restart: an MCP server started before an update to this
   version can't talk to the new relay. Restart the agent.
+- Windows says "An Application Control policy has blocked this file" (or npm reports `spawn UNKNOWN`): Smart App
+  Control blocks a `browse.exe` without an Authenticode signature, and every install method runs the same binary.
+  Releases are unsigned until Windows signing is turned on ([#317](https://github.com/anomalyco/browse/issues/317)),
+  so browse doesn't run on a computer with Smart App Control enforced.
 
 ## Development
 
