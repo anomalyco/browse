@@ -24,9 +24,8 @@ fn id() -> String {
 /// CDP client that would otherwise make it refuse.
 pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
     let running = version.get("version").and_then(Value::as_str).unwrap_or("unknown");
-    let Some(instance) = version.get("instanceId").and_then(Value::as_str) else {
-        bail!("an older browse relay ({running}) is running and can't be stopped from here; stop it, then try again");
-    };
+    // relay::probe only reports a relay whose /version has browse's fields, instanceId among them.
+    let instance = version.get("instanceId").and_then(Value::as_str).unwrap_or_default();
     if version.get("managed") != Some(&Value::Bool(true)) || version.get("shutdownProtocol").and_then(Value::as_i64) != Some(2) {
         bail!("an older browse relay ({running}) runs in the foreground; stop it (Ctrl+C where it runs), then try again");
     }

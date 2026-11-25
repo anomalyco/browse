@@ -36,6 +36,13 @@ pub const EVENT_METHODS: &[&str] = &[
     "settings",
 ];
 
+/// Whether an open `/version` reply is a browse relay's, of this build or the TypeScript one: every browse relay sends
+/// these fields (cli/src/http-api.ts, serve.rs). Another program's server can share some of them: Playwriter's relay,
+/// also on 19988, answers `{"version":"0.12.0","pid":…,"activeExecutes":0}`.
+pub fn is_browse_version(body: &Value) -> bool {
+    ["version", "buildId", "instanceId", "startedAt"].iter().all(|key| body[key].is_string()) && body["shutdownProtocol"].is_number()
+}
+
 pub fn stable_unpacked_origin() -> String {
     format!("chrome-extension://{UNPACKED_EXTENSION_ID}")
 }

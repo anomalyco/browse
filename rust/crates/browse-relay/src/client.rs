@@ -82,7 +82,7 @@ fn dechunk(mut data: &[u8]) -> anyhow::Result<Vec<u8>> {
 pub async fn version(port: u16, timeout: Duration) -> Option<Value> {
     let response = request(port, "GET", "/version", &[], None, timeout).await.ok()?;
     let body = response.json()?;
-    (response.status == 200 && body.get("version").is_some_and(Value::is_string) && body.get("instanceId").is_some_and(Value::is_string)).then_some(body)
+    (response.status == 200 && crate::protocol::is_browse_version(&body)).then_some(body)
 }
 
 /// Where the running relay is and how to authenticate with it.

@@ -849,7 +849,42 @@ async fn version_reports_every_relay_as_managed() {
     let handle = start(options, crate::tools()).await.unwrap();
     let (_, version) = http(handle.port(), "GET", "/version", None, None).await;
     assert_eq!(version["managed"], true);
+    assert!(crate::protocol::is_browse_version(&version), "{version}");
     handle.stop();
+    let _ = std::fs::remove_dir_all(&paths.data);
+}
+
+/// Playwriter's relay also defaults to 19988; this is its /version reply (#332). Neither it nor a reply with only
+/// `version` and `instanceId` is a browse relay's.
+#[test]
+fn only_browse_replies_are_browse_versions() {
+    assert!(!crate::protocol::is_browse_version(&json!({ "version": "0.12.0", "pid": 75049, "activeExecutes": 0 })));
+    assert!(!crate::protocol::is_browse_version(&json!({ "version": "0.12.0", "instanceId": "abc" })));
+    // The TypeScript relay's reply (cli/src/http-api.ts), which the Rust browse hands over from.
+    let typescript = json!({ "version": "0.0.17", "buildId": "x", "instanceId": "abc", "startedAt": "2026-11-01T00:00:00.000Z", "pid": 1, "managed": true, "shutdownProtocol": 2 });
+    assert!(crate::protocol::is_browse_version(&typescript));
+}
+
+/// With Playwriter's relay on a candidate port, an unpinned relay takes the next candidate instead of refusing to start.
+#[tokio::test]
+async fn a_playwriter_relay_on_a_candidate_port_is_skipped() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let held = listener.local_addr().unwrap().port();
+    let body = json!({ "version": "0.12.0", "pid": 75049, "activeExecutes": 0 }).to_string();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer).await;
+            let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let _ = stream.write_all(reply.as_bytes()).await;
+        }
+    });
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-playwriter-{}", crate::util::random_hex(6))));
+    let host = std::net::IpAddr::from([127, 0, 0, 1]);
+    assert_eq!(crate::port::probe(held, Duration::from_secs(2)).await, crate::port::PortOwner::Other);
+    let chosen = crate::port::choose_port(&paths, held, false, host, Some(vec![held, free])).await.unwrap();
+    assert_eq!(chosen, free);
     let _ = std::fs::remove_dir_all(&paths.data);
 }
 
