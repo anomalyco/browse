@@ -81,8 +81,10 @@ fn hello(profile: &str, mode: &str, nonce: &str, ecdh: Option<&str>) -> Value {
     if let Some(key) = ecdh {
         pairing["ecdh"] = key.into();
     }
+    // A profile named `old-…` is an extension from before tab-windows.
+    let capabilities = if profile.starts_with("old-") { json!(["tab-release"]) } else { json!(["tab-release", "tab-windows"]) };
     json!({ "method": "hello", "params": {
-        "version": "9.9.9", "build": "test", "protocolVersion": 3, "capabilities": ["tab-release"],
+        "version": "9.9.9", "build": "test", "protocolVersion": 3, "capabilities": capabilities,
         "profileId": profile, "profileName": "browse", "browser": "Chrome", "name": "Test Chrome", "pairing": pairing,
     } })
 }
@@ -166,7 +168,16 @@ fn fake_extension_with_urls(socket: Socket, next_tab: i64, urls: TargetUrls) -> 
                 "tabs.create" => {
                     let created = record.0.lock().unwrap().iter().filter(|c| c["method"] == "tabs.create").count() as i64;
                     let tab = next_tab + created - 1;
-                    json!({ "tabId": tab })
+                    // Window 500 + the tab's id, except a tab following two or more tabs, which says their windows
+                    // are 501 and 502 and goes in 502.
+                    match params["follow"].as_array() {
+                        Some(follow) if follow.len() > 1 => json!({ "tabId": tab, "windowId": 502, "rule": "followed", "windows": [502, 501] }),
+                        _ => json!({ "tabId": tab, "windowId": 500 + tab, "rule": "last-focused" }),
+                    }
+                }
+                "tabs.windows" => {
+                    let windows: serde_json::Map<String, Value> = params["tabIds"].as_array().into_iter().flatten().filter_map(Value::as_i64).map(|tab| (tab.to_string(), json!(500 + tab))).collect();
+                    json!({ "windows": windows })
                 }
                 "debugger.attach" => {
                     json!({})
@@ -967,6 +978,90 @@ async fn tab_groups_follow_the_group_label() {
     let status = seen.commands("pageStatus.set").into_iter().find(|c| c["params"]["tabId"] == labelled).unwrap();
     assert_eq!(status["params"]["status"]["owner"], "session");
     assert_eq!(status["params"]["status"]["sessionId"], "orw-counter", "the extension names the agent by the group");
+}
+
+/// A labelled tab asks the extension to open beside that label's tabs (`follow`), so it goes where the user moved them.
+/// `newWindow` asks for a window of the tab's own once: the tab doesn't keep it, and later tabs follow the label there.
+#[tokio::test]
+async fn labelled_tabs_follow_their_label_and_new_window_is_one_tab_only() {
+    let (h, seen, _events) = connected("profile-follow", 90).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let local = |tab: i64| relay.st().browser_tab(tab).unwrap().1;
+    let create = |index: usize| seen.commands("tabs.create")[index]["params"].clone();
+    let first = browser.open_tab(None, &TabOptions { new_window: true, ..grouped("jobs") }).await.unwrap().tab;
+    assert_eq!(create(0)["newWindow"], true);
+    assert!(create(0).get("follow").is_none());
+    browser.open_tab(None, &grouped("other")).await.unwrap();
+    assert!(create(1).get("follow").is_none() && create(1).get("newWindow").is_none());
+    let second = browser.open_tab(None, &grouped("jobs")).await.unwrap().tab;
+    assert_eq!(create(2)["follow"], json!([local(first)]));
+    assert!(create(2).get("newWindow").is_none());
+    assert!(relay.st().tabs[&second].warnings.is_empty(), "one window: nothing to ask");
+    let third = browser.open_tab(None, &grouped("jobs")).await.unwrap().tab;
+    let mut both = vec![local(first), local(second)];
+    both.sort_unstable();
+    assert_eq!(create(3)["follow"], json!(both));
+    let warnings = relay.st().tabs[&third].warnings.clone();
+    assert!(warnings.iter().any(|w| w.contains("several windows (502, 501)") && w.contains("window 502") && w.contains("windowOf")), "{warnings:?}");
+    assert!(!relay.st().tabs[&first].options.new_window, "the tab doesn't keep newWindow, so its popups don't inherit it");
+    browser.open_tab(None, &TabOptions::default()).await.unwrap();
+    assert!(create(4).get("follow").is_none());
+}
+
+/// windowOf opens beside a named tab (numeric or chosen id); a missing one is refused before anything opens.
+#[tokio::test]
+async fn window_of_opens_beside_the_named_tab() {
+    let (h, seen, _events) = connected("profile-window-of", 110).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let anchor = relay.create_tab(None, &grouped("jobs"), None, Some("anchor")).await.unwrap();
+    let local = relay.st().browser_tab(anchor).unwrap().1;
+    browser.open_tab(None, &TabOptions { window_of: Some("anchor".into()), ..grouped("jobs") }).await.unwrap();
+    let params = seen.commands("tabs.create")[1]["params"].clone();
+    assert_eq!(params["beside"], local);
+    assert!(params.get("follow").is_none(), "the named window wins over the label");
+    browser.open_tab(None, &TabOptions { window_of: Some(anchor.to_string()), ..TabOptions::default() }).await.unwrap();
+    assert_eq!(seen.commands("tabs.create")[2]["params"]["beside"], local);
+    let missing = browser.open_tab(None, &TabOptions { window_of: Some("4242".into()), ..TabOptions::default() }).await.err().unwrap().to_string();
+    assert!(missing.contains("isn't one of your tabs"), "{missing}");
+    let both = browser.open_tab(None, &TabOptions { window_of: Some("anchor".into()), new_window: true, ..TabOptions::default() }).await.err().unwrap().to_string();
+    assert!(both.contains("not both"), "{both}");
+    assert_eq!(seen.commands("tabs.create").len(), 3);
+}
+
+/// `tabs` list and `tabs new` say which window each tab is in, from the extension.
+#[tokio::test]
+async fn tabs_list_shows_each_tabs_window() {
+    let (h, _seen, _events) = connected("profile-windows-list", 120).await;
+    let relay = h.handle.relay.clone();
+    let opened = crate::serve::call_tool(&relay, browse_core::ToolCallRequest { name: "tabs".into(), arguments: json!({ "action": "new", "group": "jobs" }) }, None).await.unwrap();
+    let opened = text(&serde_json::to_value(opened).unwrap());
+    let tab = opened["tab"].as_i64().unwrap();
+    let local = relay.st().browser_tab(tab).unwrap().1;
+    assert_eq!(opened["window"], 500 + local);
+    let listed = crate::serve::call_tool(&relay, browse_core::ToolCallRequest { name: "tabs".into(), arguments: json!({}) }, None).await.unwrap();
+    let listed = text(&serde_json::to_value(listed).unwrap());
+    assert_eq!(listed["tabs"][0]["window"], 500 + local, "{listed}");
+}
+
+/// An extension from before tab-windows ignores the new parameters, so the relay refuses newWindow and windowOf
+/// instead of reporting a tab placed where it wasn't asked, sends it no `follow`, and lists no windows.
+#[tokio::test]
+async fn an_older_extension_refuses_window_placement() {
+    let (h, seen, _events) = connected("old-profile", 130).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let refused = browser.open_tab(None, &TabOptions { new_window: true, ..grouped("jobs") }).await.err().unwrap().to_string();
+    assert!(refused.contains("too old") && refused.contains("Update"), "{refused}");
+    assert!(seen.commands("tabs.create").is_empty(), "nothing opened");
+    let first = browser.open_tab(None, &grouped("jobs")).await.unwrap().tab;
+    let refused = browser.open_tab(None, &TabOptions { window_of: Some(first.to_string()), ..TabOptions::default() }).await.err().unwrap().to_string();
+    assert!(refused.contains("too old"), "{refused}");
+    browser.open_tab(None, &grouped("jobs")).await.unwrap();
+    assert!(seen.commands("tabs.create").iter().all(|c| c["params"].get("follow").is_none()));
+    assert!(relay.tab_windows(&[first]).await.is_empty());
+    assert!(seen.commands("tabs.windows").is_empty());
 }
 
 /// A popup an agent's page opens is an agent tab too, with the opener's options, and its group closes with it.

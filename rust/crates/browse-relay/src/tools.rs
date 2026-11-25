@@ -53,13 +53,13 @@ impl Tool for TabsTool {
         properties.insert("url".into(), json!({ "type": "string", "description": "new: the URL to open (else about:blank)." }));
         properties.insert("tab".into(), json!({ "type": ["integer", "string"], "description": "close: the tab to close: its numeric id, or a chosen id like `work-mail`." }));
         properties.insert("tabs".into(), json!({ "type": "array", "items": { "type": ["integer", "string"] }, "description": "close: several tabs to close, by numeric or chosen id." }));
-        properties.insert("group".into(), json!({ "type": "string", "description": "new: the new tab's group label. list: only that group's tabs. close: close every tab opened with that group (and their popups)." }));
+        properties.insert("group".into(), json!({ "type": "string", "description": "new: the new tab's group label; it opens in the window where that group's tabs are, also after the user moves them. list: only that group's tabs. close: close every tab opened with that group (and their popups)." }));
         properties.insert("idleMinutes".into(), json!({ "type": "number", "minimum": 0, "description": "close: only tabs no call used for this long. It narrows tab, tabs or group; it doesn't pick tabs on its own." }));
         ToolSpec {
             name: "tabs".into(),
-            description: "List, open or close tabs. Tabs are the handle every other tool takes as `tab`. `list` returns every agent tab and every tab the user lent (tab id, id when one was chosen, url, title, group, options, lent, lastUsed, busy, handoff and browser). `handoff` is there while a call in that tab waits on the user: it has the message shown to them and when it started (`startedAt`). An id or group from that list tells you which tabs you opened; use only those unless the user asks you to touch another. `new` opens a background tab (at `url`, else about:blank), waits for it to load and returns its `tab` id; `navigate` without `tab` does the same. Give it an `id` like `work-mail` to name the tab yourself: opening that id again returns the tab it already names, without navigating it, and the id lasts while the tab is open (a relay restart or extension reload keeps it; a browser restart loses it, and opening the id again is a fresh tab). Use it as `tab` in every tool. `keepOpen: true` keeps the tab until an agent or the user closes it, instead of idle cleanup. `close` needs explicit tabs: `tab`, `tabs` or a whole `group`; a lent tab is given back to the user instead of closed. Tabs open in the background and never take focus from the user; close the ones you opened when you're done.".into(),
+            description: "List, open or close tabs. Tabs are the handle every other tool takes as `tab`. `list` returns every agent tab and every tab the user lent (tab id, id when one was chosen, url, title, group, options, lent, lastUsed, busy, handoff, browser and window: the browser window it is in, to tell which tabs share one). `handoff` is there while a call in that tab waits on the user: it has the message shown to them and when it started (`startedAt`). An id or group from that list tells you which tabs you opened; use only those unless the user asks you to touch another. `new` opens a background tab (at `url`, else about:blank), waits for it to load and returns its `tab` id; `navigate` without `tab` does the same. Give it an `id` like `work-mail` to name the tab yourself: opening that id again returns the tab it already names, without navigating it, and the id lasts while the tab is open (a relay restart or extension reload keeps it; a browser restart loses it, and opening the id again is a fresh tab). Use it as `tab` in every tool. `keepOpen: true` keeps the tab until an agent or the user closes it, instead of idle cleanup. `close` needs explicit tabs: `tab`, `tabs` or a whole `group`; a lent tab is given back to the user instead of closed. Tabs open in the background and never take focus from the user; close the ones you opened when you're done.".into(),
             input_schema: object(Value::Object(properties), &[]),
-            output_schema: Some(browse_core::output_schema(json!({ "tabs": { "type": "array", "description": "list: your tabs and the ones the user lent" }, "tab": { "type": "integer", "description": "new: the tab id" }, "url": { "type": "string" }, "title": { "type": "string" }, "existed": { "type": "boolean" }, "closed": { "type": "array" } }), &[])),
+            output_schema: Some(browse_core::output_schema(json!({ "tabs": { "type": "array", "description": "list: your tabs and the ones the user lent" }, "tab": { "type": "integer", "description": "new: the tab id" }, "url": { "type": "string" }, "title": { "type": "string" }, "window": { "type": "integer", "description": "the browser window the tab is in" }, "existed": { "type": "boolean" }, "closed": { "type": "array" } }), &[])),
         }
     }
 
@@ -71,6 +71,18 @@ impl Tool for TabsTool {
                 refresh_titles(&relay).await;
                 let group = string(&args, "group");
                 let tabs: Vec<_> = relay.tab_infos().into_iter().filter(|t| group.is_none() || t.options.group == group).collect();
+                let windows = relay.tab_windows(&tabs.iter().map(|t| t.tab).collect::<Vec<_>>()).await;
+                let tabs = tabs
+                    .into_iter()
+                    .map(|info| {
+                        let tab = info.tab;
+                        let mut value = serde_json::to_value(info)?;
+                        if let Some(window) = windows.get(&tab) {
+                            value["window"] = (*window).into();
+                        }
+                        Ok(value)
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
                 Ok(json_output(json!({ "tabs": tabs })))
             }
             "new" => {
@@ -105,10 +117,15 @@ impl Tool for TabsTool {
                 }
                 let tab = opened?;
                 relay.note_call_tab(tab);
-                let st = relay.st();
-                let info = relay.tab_info(&st, tab).context("The tab went away")?;
-                drop(st);
-                Ok(json_output(serde_json::to_value(info)?))
+                let info = {
+                    let st = relay.st();
+                    relay.tab_info(&st, tab).context("The tab went away")?
+                };
+                let mut value = serde_json::to_value(info)?;
+                if let Some(window) = relay.tab_windows(&[tab]).await.get(&tab) {
+                    value["window"] = (*window).into();
+                }
+                Ok(json_output(value))
             }
             "close" => close_tabs(&relay, &args).await,
             other => bail!("Unknown action {other:?}: use list, new or close"),

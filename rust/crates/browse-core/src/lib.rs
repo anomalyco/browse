@@ -49,6 +49,13 @@ pub struct TabOptions {
     /// The connected browser to open the tab in (an id or name `status` lists); the first connected one by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser: Option<String>,
+    /// Open this one tab in a new background window. Not kept with the tab: popups and later tabs don't inherit it
+    /// (later tabs with the same `group` follow it into that window instead).
+    #[serde(skip)]
+    pub new_window: bool,
+    /// Open this one tab in the window another tab is in (its numeric or chosen id, as given). Not kept with the tab.
+    #[serde(skip)]
+    pub window_of: Option<String>,
 }
 
 impl TabOptions {
@@ -89,12 +96,19 @@ impl TabOptions {
             keep_visible: flag("keepVisible")?,
             keep_open: flag("keepOpen")?,
             browser: text("browser")?,
+            new_window: flag("newWindow")?,
+            window_of: match args.get("windowOf") {
+                None | Some(Value::Null) => None,
+                Some(Value::Number(number)) => Some(number.to_string()),
+                Some(Value::String(text)) => Some(text.trim().to_string()).filter(|t| !t.is_empty()),
+                Some(other) => anyhow::bail!("windowOf must be a tab id (a number or a chosen id like `work-mail`), not {other}"),
+            },
         })
     }
 
     /// The option arguments `from_args` reads that the call gave, to refuse them where they don't apply.
     pub fn given(args: &Value) -> Vec<&'static str> {
-        ["group", "allowedOrigins", "readOnly", "keepVisible", "keepOpen", "browser"]
+        ["group", "allowedOrigins", "readOnly", "keepVisible", "keepOpen", "browser", "newWindow", "windowOf"]
             .into_iter()
             .filter(|key| args.get(*key).is_some_and(|v| !v.is_null()))
             .collect()
@@ -103,12 +117,14 @@ impl TabOptions {
     /// The JSON schema properties of the options for opening a tab.
     pub fn schema() -> serde_json::Map<String, Value> {
         let Value::Object(map) = serde_json::json!({
-            "group": { "type": "string", "description": "When opening a tab: a label for it (and the popups it opens), e.g. the task's name. It is the tab group's title in the browser, and `tabs` can list or close a whole group at once." },
+            "group": { "type": "string", "description": "When opening a tab: a label for it (and the popups it opens), e.g. the task's name. It is the tab group's title in the browser, and `tabs` can list or close a whole group at once. A new tab with a label opens in the window where that label's tabs are, also after the user moves them." },
             "allowedOrigins": { "type": "array", "items": { "type": "string" }, "description": "When opening a tab: hosts or origins it may load (example.com, *.example.com, https://app.example.com, http://localhost:3000). Navigations elsewhere are refused or sent back to about:blank; private and loopback addresses need an exact entry. Popups inherit it. It limits top-level navigations, not iframes or the requests a page makes." },
             "readOnly": { "type": "boolean", "description": "When opening a tab: only read it (snapshots, screenshots, page state); input and later navigation commands are refused, but `eval` and `webmcp` still run page JavaScript that can read, change and navigate the page, so it is not a data boundary." },
             "keepVisible": { "type": "boolean", "description": "When opening a tab: keep it focused to the page between calls, for apps that pause while hidden. Pages can notice." },
             "keepOpen": { "type": "boolean", "description": "When opening a tab: never close it as idle; it stays open until an agent closes it or the user does. Off by default." },
             "browser": { "type": "string", "description": "When opening a tab: which connected browser, by the id or name `status` lists. Defaults to the first connected one." },
+            "newWindow": { "type": "boolean", "description": "When opening a tab: open it in a new background window, when the user asks for a task in a new window. Give it a `group`: later tabs with that group open there too." },
+            "windowOf": { "type": ["integer", "string"], "description": "When opening a tab: open it in the window this tab (one of yours or a lent one, by id) is in. Use it when the user names the window to continue in." },
         }) else {
             unreachable!()
         };

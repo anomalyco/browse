@@ -203,8 +203,13 @@ extension from your browser to finish.
   that tab once: asking again returns the same tab without navigating it, and every tool takes `work-mail` as `tab`.
   The id lasts while the tab stays open: a relay restart or extension reload keeps it, and a browser restart loses it
   (opening that id again is a fresh tab). `tabs` lists each tab's id, url, title, group, last use, whether a call is
-  running in it, and a waiting handoff's message. A tab opened with `keepOpen: true` stays until an agent or you close
-  it; every other tab closes when idle like the rest.
+  running in it, the browser window it's in, and a waiting handoff's message. A tab opened with `keepOpen: true` stays
+  until an agent or you close it; every other tab closes when idle like the rest.
+- **A task keeps to its window.** A new tab with a `group` label opens in the window where that label's tabs are, in
+  either window setting, so if you move a task's tabs to a window of their own, its next tabs open there too (when
+  they're split across windows, the one you used last; the agent is told so it can ask you). An agent can also open
+  a task in a new background window (`newWindow`) or in the window of a tab it names (`windowOf`); neither changes
+  your window setting. `OPENCODE_BROWSER_AGENT_WINDOW` fixes placement, so labels don't move tabs while it's set.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
   you're looking at one (you can turn that off). Agents can't switch you to their tabs or bring a window to the front.
   Tabs nobody touches for 10 minutes close by themselves (never while something runs on them). Closing agent tabs never
@@ -336,7 +341,7 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
 | `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Allow bringing a tab's window to the front |
 | `OPENCODE_BROWSER_ALLOW_FILE_URLS=1` | Allow `file:` URLs |
 | `OPENCODE_BROWSER_FILE_ROOTS` | More folders tools may read and write (path-list separated) |
-| `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in yours), overriding the options page |
+| `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in yours), overriding the options page; labelled tabs no longer follow their label's window |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed; overrides the options page |
 | `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Only tell about new versions (`off`: check, but never install or tell; `on`: install them, the default) |
 | `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long to wait for a bot check the browser clears by itself |

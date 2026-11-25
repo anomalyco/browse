@@ -147,6 +147,9 @@ impl Relay {
         let url = url.map(str::trim).filter(|u| !u.is_empty() && *u != "about:blank");
         let mut options = Self::normalize_options(options)?;
         options.browser = None;
+        // Window placement is the extension's; the tab (and its popups) never keep a one-off request.
+        options.new_window = false;
+        options.window_of = None;
         if let Some(url) = url {
             if let Some(refusal) = crate::guardrails::guard("Target.createTarget", &json!({ "url": url }), false, &Vec::new) {
                 bail!(refusal);
