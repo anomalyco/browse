@@ -1,5 +1,6 @@
 export * as AgentGroups from "./groups"
-import { AGENT_GROUPING_KEY, AGENT_GROUP_COLLAPSE_KEY, agentGroupCollapse, agentGrouping, type AgentGrouping } from "../../shared/protocol"
+import { readSetting } from "../../shared/policy"
+import type { AgentGrouping } from "../../shared/protocol"
 
 // Agent tab groups stay out of the way: at the start of the tab strip, right after pinned tabs (the top of a
 // vertical strip), and
@@ -26,12 +27,12 @@ const keepers: ((tabId: number) => boolean)[] = []
 
 /** The setting: "shared" (one group for every agent, the default), "session" (one per agent session) or "none". */
 export async function mode(): Promise<AgentGrouping> {
-  return agentGrouping((await chrome.storage.local.get(AGENT_GROUPING_KEY))[AGENT_GROUPING_KEY])
+  return readSetting("grouping")
 }
 
 /** The setting: "auto" (browse folds groups away, the default) or "off" (leave each group as the user set it). */
 async function collapseMode() {
-  return agentGroupCollapse((await chrome.storage.local.get(AGENT_GROUP_COLLAPSE_KEY))[AGENT_GROUP_COLLAPSE_KEY])
+  return readSetting("groupCollapse")
 }
 
 export function keepOpenWhile(check: (tabId: number) => boolean) {

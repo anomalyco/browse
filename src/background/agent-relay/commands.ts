@@ -6,7 +6,8 @@ import {
   type JsonObject,
   type PageStatus,
 } from "../../agent-relay/protocol"
-import { MUTE_TABS_KEY, muteTabs, type AgentRelayUpdate, type RelayAutoUpdate, type RelayOverrides } from "../../shared/protocol"
+import { readSetting } from "../../shared/policy"
+import type { AgentRelayUpdate, RelayAutoUpdate, RelayOverrides } from "../../shared/protocol"
 import { AgentGroups } from "./groups"
 import { AgentWindow } from "./window"
 import { DebuggerHub } from "../debugger-hub"
@@ -160,7 +161,7 @@ export function createRelayCommands(deps: {
         const deadline = Date.now() + CREATE_BUDGET_MS
         const creating = await TabCleanup.beginCreate(url, keepOpen)
         // Read once, before the tab exists: the mute agent tabs setting decides whether this one opens quiet.
-        const muted = muteTabs((await chrome.storage.local.get(MUTE_TABS_KEY))[MUTE_TABS_KEY]) === "on"
+        const muted = (await readSetting("muteTabs")) === "on"
         const opened = await AgentWindow.open(url, {
           active,
           ...(AgentWindow.isPlacement(params?.window) ? { override: params.window } : {}),

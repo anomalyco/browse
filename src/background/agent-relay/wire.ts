@@ -1,5 +1,6 @@
 import { isJsonObject, type JsonObject } from "../../agent-relay/protocol"
-import { autoUpdateMode, BROWSER_NAME_KEY, relayInstallMethods, type RelayAutoUpdate, type RelayUpdateFailure } from "../../shared/protocol"
+import { effectiveBrowserName } from "../../shared/policy"
+import { autoUpdateMode, relayInstallMethods, type RelayAutoUpdate, type RelayUpdateFailure } from "../../shared/protocol"
 import type { createAgentRelayLog } from "./log"
 import type { ecdhKeyPair, PairingCode } from "../pairing"
 
@@ -8,8 +9,11 @@ export type AgentRelayLog = ReturnType<typeof createAgentRelayLog>
 /** Badge text the relay asked for, by tab. */
 export type AgentBadge = { text: string; title?: string }
 
-/** What a connection pairs with: this browser's token for the relay, or a code to exchange for one. */
-export type Credential = { kind: "token"; token: string } | { kind: "code"; code: PairingCode; source: "entered" | "bundled" }
+/** What a connection pairs with: this browser's token for the relay, a code, or local policy auto-pairing. */
+export type Credential =
+  | { kind: "token"; token: string }
+  | { kind: "code"; code: PairingCode; source: "entered" | "bundled" }
+  | { kind: "local" }
 
 export type Handshake = {
   nonce: string
@@ -103,10 +107,9 @@ export function browserBrand(): string {
   return known.find(([brand]) => brands.includes(brand))?.[1] ?? "Chrome"
 }
 
-/** The name set on the status page, if any. */
+/** The name set by browser policy or on the status page, if any. */
 export async function browserName(): Promise<string | undefined> {
-  const value = (await chrome.storage.local.get(BROWSER_NAME_KEY))[BROWSER_NAME_KEY]
-  return typeof value === "string" && value.trim() ? value.trim().slice(0, 60) : undefined
+  return effectiveBrowserName()
 }
 
 /**

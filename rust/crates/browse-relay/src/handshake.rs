@@ -36,6 +36,7 @@ pub const UNPAIRED_PRESENCE_TTL: Duration = Duration::from_secs(10 * 60);
 enum Mode {
     Token,
     Code,
+    Local,
     Legacy,
     Old,
 }
@@ -162,6 +163,7 @@ impl Handshake {
         let mode = match str_field(pairing, "mode") {
             Some("token") => Mode::Token,
             Some("code") => Mode::Code,
+            Some("local") => Mode::Local,
             Some("legacy") => Mode::Legacy,
             _ => Mode::Old,
         };
@@ -200,7 +202,14 @@ impl Handshake {
                 self.send(json!({ "method": "auth.challenge", "params": { "nonce": relay_nonce, "proof": proof, "protocol": protocol } }));
                 challenge.expected = Some(pairing::legacy_pairing_proof(&code, "extension", port, &extension_nonce, &relay_nonce));
             }
-            Mode::Code | Mode::Legacy => {
+            Mode::Code | Mode::Local | Mode::Legacy => {
+                if mode == Mode::Local && (!crate::guardrails::env_on("OPENCODE_BROWSER_AUTO_PAIR_LOCAL") || !crate::origins::is_local_peer(&self.peer)) {
+                    return self.refuse(
+                        "local auto-pair disabled",
+                        mode,
+                        "Local auto-pairing is disabled on this relay: run `pair` and enter the code, or set OPENCODE_BROWSER_AUTO_PAIR_LOCAL=1",
+                    );
+                }
                 let extension_key = str_field(pairing, "ecdh").unwrap_or("").to_string();
                 let Some(exchange) = pairing::ecdh_exchange(&extension_key) else { return close(4002, "Invalid pairing key") };
                 let transcript = Transcript { port, extension_nonce: extension_nonce.clone(), relay_nonce: relay_nonce.clone(), extension_key, relay_key: exchange.public_key.clone() };
@@ -208,12 +217,17 @@ impl Handshake {
                     self.send(json!({ "method": "auth.challenge", "params": { "nonce": relay_nonce, "ecdh": exchange.public_key, "protocol": protocol } }));
                     challenge.code = Some((exchange.secret, transcript));
                 } else {
-                    let Some(legacy) = pairing::legacy_pairing_code(paths) else {
-                        return self.refuse("shared code retired", mode, "The old pairing code is no longer accepted: run `pair` and enter the new code");
+                    let material = if mode == Mode::Local {
+                        "local".to_string()
+                    } else {
+                        let Some(legacy) = pairing::legacy_pairing_code(paths) else {
+                            return self.refuse("shared code retired", mode, "The old pairing code is no longer accepted: run `pair` and enter the new code");
+                        };
+                        legacy
                     };
-                    let session = pairing::pairing_session_key(&legacy, &exchange.secret, &transcript);
+                    let session = pairing::pairing_session_key(&material, &exchange.secret, &transcript);
                     let token = pairing::new_browser_token();
-                    rlog!("extension.pairing", mode = "legacy");
+                    rlog!("extension.pairing", mode = if mode == Mode::Local { "local" } else { "legacy" });
                     self.send(json!({ "method": "auth.challenge", "params": {
                         "nonce": relay_nonce, "ecdh": exchange.public_key, "proof": pairing::session_proof(&session, "relay"),
                         "wrapped": pairing::wrap_token(&session, &token), "protocol": protocol,

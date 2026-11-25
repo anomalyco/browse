@@ -2,6 +2,7 @@
 // and a few small pieces of UI built on @opencode/ui.
 import { createSignal, For, onCleanup, Show, type JSX } from "solid-js"
 import { Button } from "@opencode/ui/button"
+import { parseManagedValue, readManaged, type ManagedSettings } from "../shared/policy"
 import {
   STATUS_PORT,
   type AgentRelayState,
@@ -63,6 +64,32 @@ export function createStored<T>(key: string, read: (stored: unknown) => T) {
   onCleanup(() => chrome.storage.onChanged.removeListener(changed))
   const save = (next: unknown) => void chrome.storage.local.set({ [key]: next })
   return [value, save] as const
+}
+
+/** A setting backed by chrome.storage.local and overridden by browser policy (chrome.storage.managed) when set. */
+export function createPolicySetting<T>(
+  policyKey: keyof ManagedSettings,
+  localKey: string,
+  readLocal: (stored: unknown) => T,
+) {
+  const [localValue, setLocalValue] = createSignal<T>(readLocal(undefined))
+  const [managedValue, setManagedValue] = createSignal<T | undefined>(undefined)
+  void chrome.storage.local.get(localKey).then((stored) => setLocalValue(() => readLocal(stored[localKey])))
+  void readManaged(policyKey).then((val) => setManagedValue(() => val as T | undefined))
+  const changed = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+    if (area === "local" && localKey in changes) setLocalValue(() => readLocal(changes[localKey]?.newValue))
+    if (area === "managed" && policyKey in changes)
+      setManagedValue(() => parseManagedValue(policyKey, changes[policyKey]?.newValue) as T | undefined)
+  }
+  chrome.storage.onChanged.addListener(changed)
+  onCleanup(() => chrome.storage.onChanged.removeListener(changed))
+  const value = () => (managedValue() !== undefined ? (managedValue() as T) : localValue())
+  const managed = () => managedValue() !== undefined
+  const save = (next: unknown) => {
+    if (managed()) return
+    void chrome.storage.local.set({ [localKey]: next })
+  }
+  return [value, save, managed] as const
 }
 
 /** Text with `code` spans. */

@@ -22,6 +22,9 @@
     "page": "settings.html",
     "open_in_tab": true
   },
+  "storage": {
+    "managed_schema": "schema.json"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"

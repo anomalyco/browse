@@ -1,7 +1,7 @@
 export * as HandoffNotice from "./handoff-notice"
 
 import type { PageStatus } from "../agent-relay/protocol"
-import { HANDOFF_NOTIFICATIONS_KEY, handoffNotifications } from "../shared/protocol"
+import { readSetting } from "../shared/policy"
 
 // A recording must show only the page, so a handoff on a tab being recorded draws no card there. The toolbar badge
 // says WAIT, and a system notification tells the user which agent needs them where; clicking it shows the tab
@@ -69,7 +69,7 @@ export async function sync(tabId: number, page: PageStatus | undefined, sessionN
 
 /** The setting: "recording" (notify only while the tab is recorded, the default) or "always". */
 async function mode() {
-  return handoffNotifications((await chrome.storage.local.get(HANDOFF_NOTIFICATIONS_KEY))[HANDOFF_NOTIFICATIONS_KEY])
+  return readSetting("handoffNotifications")
 }
 
 export async function clear(tabId: number) {

@@ -10,10 +10,10 @@ import {
   type JsonObject,
   type PageStatus,
 } from "../agent-relay/protocol"
+import { effectiveRelayAddress, readManaged, readSetting } from "../shared/policy"
 import {
   HUMAN_INPUT_KEY,
   MUTE_TABS_KEY,
-  humanInput,
   muteTabs,
   RELAY_ADDRESS_KEY,
   type AgentRelayState,
@@ -301,9 +301,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   // The relay-side settings apply as soon as they change; the relay answers with what its environment fixes.
   const sendSettings = async () => {
     if (!open()) return
-    const stored = await chrome.storage.local.get([HUMAN_INPUT_KEY])
     const settings: RelaySettings = {
-      humanInput: humanInput(stored[HUMAN_INPUT_KEY]),
+      humanInput: await readSetting("humanInput"),
     }
     log.add("settings", settings)
     send({ method: "settings", params: settings })
@@ -421,8 +420,9 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     // An unpacked build's pairing file names the relay's port when it isn't 19988 (cli/src/relay/port.ts).
     await handshake.pairingHint()
     const stored = await chrome.storage.local.get([PORT_KEY, RELAY_ADDRESS_KEY, ...discoveredKeys])
-    // An address the user set (or the PORT_KEY dev pin), else this one: 19988, or the port a hint or scan found.
-    const target = relayTarget(stored)
+    const address = await effectiveRelayAddress(stored)
+    // An address from browser policy or user settings (or PORT_KEY dev pin), else this one: 19988 or discovered port.
+    const target = relayTarget({ ...stored, [RELAY_ADDRESS_KEY]: address })
     const previous = `${host}:${port}`
     host = target.host
     port = target.port
@@ -607,10 +607,24 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     // waiting. connect() reuses a socket that's still connecting or open, so this can't stack connections.
     if (alarm.name === ALARM) void connect("alarm")
   })
+  let muteSync: Promise<unknown> = Promise.resolve()
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && HUMAN_INPUT_KEY in changes) void sendSettings()
-    if (area === "local" && MUTE_TABS_KEY in changes)
-      void TabCleanup.setMuted(muteTabs(changes[MUTE_TABS_KEY]?.newValue) === "on").catch(() => undefined)
+    if ((area === "local" && HUMAN_INPUT_KEY in changes) || (area === "managed" && "humanInput" in changes))
+      void sendSettings()
+    if (area === "local" && MUTE_TABS_KEY in changes) {
+      const localMuted = muteTabs(changes[MUTE_TABS_KEY]?.newValue) === "on"
+      muteSync = muteSync
+        .then(async () => {
+          const policy = await readManaged("muteTabs")
+          return TabCleanup.setMuted((policy ?? (localMuted ? "on" : "off")) === "on")
+        })
+        .catch(() => undefined)
+    } else if (area === "managed" && "muteTabs" in changes) {
+      muteSync = muteSync
+        .then(() => readSetting("muteTabs"))
+        .then((mode) => TabCleanup.setMuted(mode === "on"))
+        .catch(() => undefined)
+    }
   })
   // A code entered on the status page, a new relay address or a new name takes effect on a fresh connection.
   chrome.storage.onChanged.addListener(handshake.onPairingStorageChanged)

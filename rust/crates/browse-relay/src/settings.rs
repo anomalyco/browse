@@ -23,12 +23,13 @@ pub fn spec(key: &str) -> Option<Spec> {
     })
 }
 
-pub const SECURITY_VARIABLES: [&str; 6] = [
+pub const SECURITY_VARIABLES: [&str; 7] = [
     "OPENCODE_BROWSER_ALLOW_ALL_COOKIES",
     "OPENCODE_BROWSER_ALLOW_REMOTE_DRIVERS",
     "OPENCODE_BROWSER_ALLOW_FOREGROUND",
     "OPENCODE_BROWSER_ALLOW_ALL_STORAGE",
     "OPENCODE_BROWSER_ALLOW_FILE_URLS",
+    "OPENCODE_BROWSER_AUTO_PAIR_LOCAL",
     "OPENCODE_BROWSER_UPDATE_CHECK",
 ];
 
@@ -151,7 +152,20 @@ fn lookup<'a>(settings: &'a [(String, String)], key: &str) -> &'a str {
     settings.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()).unwrap_or("")
 }
 
+/// Settings fixed by browser policy, as the extension's settings.get / settings.set answer lists them.
+pub fn managed_from_extension(answer: &Value) -> Vec<String> {
+    answer
+        .get("managed")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).filter(|k| AGENT_KEYS.contains(k)).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 pub fn report(stored: &[(String, String)]) -> Value {
+    report_with_managed(stored, &[])
+}
+
+pub fn report_with_managed(stored: &[(String, String)], managed: &[String]) -> Value {
     let fixed = overrides();
     let mut map = Map::new();
     for key in AGENT_KEYS {
@@ -166,6 +180,8 @@ pub fn report(stored: &[(String, String)]) -> Value {
         });
         if let Some((_, variable, _)) = over {
             entry["overriddenBy"] = (*variable).into();
+        } else if managed.iter().any(|k| k == key) {
+            entry["overriddenBy"] = "browser policy".into();
         }
         map.insert(key.into(), entry);
     }
@@ -177,12 +193,20 @@ pub fn security_note() -> String {
 }
 
 pub fn describe_changes(before: &[(String, String)], after: &[(String, String)], requested: &[(String, String)]) -> Value {
+    describe_changes_with_managed(before, after, requested, &[])
+}
+
+pub fn describe_changes_with_managed(before: &[(String, String)], after: &[(String, String)], requested: &[(String, String)], managed: &[String]) -> Value {
     let fixed = overrides();
     let (mut changed, mut unchanged, mut overridden, mut lines) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (key, value) in requested {
-        if let Some((_, variable, effective)) = fixed.iter().find(|(k, _, _)| k == key) {
+        if let Some((_, variable, effective)) = fixed.iter().find(|(k, _, _)| *k == key) {
             overridden.push(json!({ "key": key, "requested": shown(key, value), "variable": variable, "effective": shown(key, effective) }));
             lines.push(format!("Not changed: {key} is fixed to {effective} by {variable} in the relay's environment, so this setting has no effect. Tell the user; to change it they remove or edit {variable} where opencode starts, then restart the relay."));
+        } else if managed.iter().any(|k| k == key) {
+            let effective = lookup(after, key);
+            overridden.push(json!({ "key": key, "requested": shown(key, value), "policy": "browser policy", "effective": shown(key, effective) }));
+            lines.push(format!("Not changed: {key} is fixed to {effective} by browser policy, so this setting can't be changed here. Tell the user; to change it they update their browser policy configuration."));
         } else if lookup(before, key) == lookup(after, key) {
             unchanged.push(key.clone());
         } else {
@@ -197,7 +221,7 @@ pub fn describe_changes(before: &[(String, String)], after: &[(String, String)],
         let text = unchanged.iter().map(|k| format!("{k} is {}", lookup(after, k))).collect::<Vec<_>>().join(", ");
         lines.push(format!("Already set: {text}."));
     }
-    json!({ "changed": changed, "unchanged": unchanged, "overridden": overridden, "settings": report(after), "message": lines.join(" ") })
+    json!({ "changed": changed, "unchanged": unchanged, "overridden": overridden, "settings": report_with_managed(after, managed), "message": lines.join(" ") })
 }
 
 #[cfg(test)]
@@ -251,5 +275,24 @@ mod tests {
         // Only exactly "on" mutes; any other value the extension might send reads as off, as in the extension.
         let odd = from_extension(&json!({ "settings": { "muteTabs": "sometimes" } })).unwrap();
         assert_eq!(lookup(&odd, "muteTabs"), "off", "only on is on");
+    }
+
+    #[test]
+    fn reports_and_protects_browser_policy_managed_settings() {
+        let answer = json!({
+            "settings": { "window": "current", "grouping": "session", "groupCollapse": "off", "idleMinutes": 30, "humanInput": "on", "muteTabs": "on", "handoffNotifications": "always" },
+            "managed": ["grouping", "idleMinutes", "unknownKey"],
+        });
+        let stored = from_extension(&answer).unwrap();
+        let managed = managed_from_extension(&answer);
+        assert_eq!(managed, vec!["grouping".to_string(), "idleMinutes".to_string()]);
+        let reported = report_with_managed(&stored, &managed);
+        assert_eq!(reported["grouping"]["overriddenBy"], "browser policy");
+        assert_eq!(reported["idleMinutes"]["overriddenBy"], "browser policy");
+        assert!(reported["muteTabs"].get("overriddenBy").is_none());
+
+        let result = describe_changes_with_managed(&stored, &stored, &[("grouping".into(), "none".into())], &managed);
+        assert_eq!(result["overridden"][0]["policy"], "browser policy");
+        assert!(result["message"].as_str().unwrap().contains("browser policy"));
     }
 }

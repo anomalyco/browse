@@ -1,39 +1,14 @@
 export * as UserSettings from "./user-settings"
 import type { JsonObject } from "../agent-relay/protocol"
-import {
-  AGENT_GROUPING_KEY,
-  AGENT_GROUP_COLLAPSE_KEY,
-  AGENT_WINDOW_KEY,
-  HANDOFF_NOTIFICATIONS_KEY,
-  HUMAN_INPUT_KEY,
-  IDLE_MINUTES_KEY,
-  MUTE_TABS_KEY,
-  agentGroupCollapse,
-  agentGrouping,
-  agentWindowPlacement,
-  handoffNotifications,
-  humanInput,
-  idleMinutesSetting,
-  muteTabs,
-} from "../shared/protocol"
+import { SETTING_LOCAL_KEYS, readAllSettings, readManagedAll, type PolicySettingKey } from "../shared/policy"
 
 // The status page's settings for the relay's settings tool (`settings.get`, `settings.set`; cli/src/user-settings.ts).
 // They live in chrome.storage.local like the page's own changes, so the page follows them live and the background
-// applies them (and sends input to the relay) exactly as if the user had chosen them there.
-
-const keys = {
-  window: AGENT_WINDOW_KEY,
-  grouping: AGENT_GROUPING_KEY,
-  groupCollapse: AGENT_GROUP_COLLAPSE_KEY,
-  idleMinutes: IDLE_MINUTES_KEY,
-  humanInput: HUMAN_INPUT_KEY,
-  muteTabs: MUTE_TABS_KEY,
-  handoffNotifications: HANDOFF_NOTIFICATIONS_KEY,
-} as const
-type Key = keyof typeof keys
+// applies them (and sends input to the relay) exactly as if the user had chosen them there. Browser-managed policy
+// (chrome.storage.managed) fixes any key it sets without touching chrome.storage.local.
 
 /** The values the page offers; anything else is refused. idleMinutes 0 is never. */
-const values: Record<Key, readonly (string | number)[]> = {
+const values: Record<PolicySettingKey, readonly (string | number)[]> = {
   window: ["current", "separate"],
   grouping: ["session", "shared", "none"],
   groupCollapse: ["auto", "off"],
@@ -43,30 +18,25 @@ const values: Record<Key, readonly (string | number)[]> = {
   handoffNotifications: ["recording", "always"],
 }
 
-/** Every setting as the background reads it (unknown stored values read as the default). */
+/** Every setting as the background reads it (policy over local over default), plus which keys policy fixes. */
 export async function read(): Promise<JsonObject> {
-  const stored = await chrome.storage.local.get(Object.values(keys))
+  const { settings, managed } = await readAllSettings()
   return {
-    settings: {
-      window: agentWindowPlacement(stored[AGENT_WINDOW_KEY]),
-      grouping: agentGrouping(stored[AGENT_GROUPING_KEY]),
-      groupCollapse: agentGroupCollapse(stored[AGENT_GROUP_COLLAPSE_KEY]),
-      idleMinutes: idleMinutesSetting(stored[IDLE_MINUTES_KEY]),
-      humanInput: humanInput(stored[HUMAN_INPUT_KEY]),
-      muteTabs: muteTabs(stored[MUTE_TABS_KEY]),
-      handoffNotifications: handoffNotifications(stored[HANDOFF_NOTIFICATIONS_KEY]),
-    },
+    settings,
+    ...(managed.length ? { managed } : {}),
   }
 }
 
-/** Stores the given settings after checking every one (none is written if any is invalid); answers with all of them. */
+/** Stores the given settings after checking every one (none is written if any is invalid); skips policy-managed keys. */
 export async function write(changes: JsonObject | undefined): Promise<JsonObject> {
+  const policy = await readManagedAll()
   const items: Record<string, string | number> = {}
   for (const [key, value] of Object.entries(changes ?? {})) {
-    if (!(key in keys)) throw new Error(`Unknown setting: ${key}`)
-    if ((typeof value !== "string" && typeof value !== "number") || !values[key as Key].includes(value))
+    if (!(key in SETTING_LOCAL_KEYS)) throw new Error(`Unknown setting: ${key}`)
+    const settingKey = key as PolicySettingKey
+    if ((typeof value !== "string" && typeof value !== "number") || !values[settingKey].includes(value))
       throw new Error(`Invalid value for ${key}: ${JSON.stringify(value)}`)
-    items[keys[key as Key]] = value
+    if (policy[settingKey] === undefined) items[SETTING_LOCAL_KEYS[settingKey]] = value
   }
   if (Object.keys(items).length) await chrome.storage.local.set(items)
   return read()

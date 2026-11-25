@@ -403,27 +403,33 @@ impl Tool for SettingsTool {
         let link = relay.st().default_link().filter(|l| l.connected()).ok_or_else(|| {
             anyhow!("The browse extension isn't connected, so its settings can't be read or changed. Ask the user to open the browser with the extension; its options page shows whether it's connected.")
         })?;
-        let read = |answer: Result<Value, crate::link::RpcError>| -> anyhow::Result<Vec<(String, String)>> {
+        let read = |answer: Result<Value, crate::link::RpcError>| -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
             let answer = answer.map_err(|error| match error.to_string() {
                 text if text.contains("Invalid extension command") => anyhow!("The connected browse extension is too old to read or change settings from here. Update it, or change them on its options page."),
                 text => anyhow!(text),
             })?;
-            crate::settings::from_extension(&answer).map_err(|e| anyhow!(e))
+            let managed = crate::settings::managed_from_extension(&answer);
+            let values = crate::settings::from_extension(&answer).map_err(|e| anyhow!(e))?;
+            Ok((values, managed))
         };
-        let before = read(relay.ext_link(&link, "settings.get", Value::Null).await)?;
+        let (before, managed) = read(relay.ext_link(&link, "settings.get", Value::Null).await)?;
         let Some(set) = args.get("set").filter(|v| !v.is_null()) else {
-            return Ok(json_output(json!({ "settings": crate::settings::report(&before), "note": crate::settings::security_note() })));
+            return Ok(json_output(json!({ "settings": crate::settings::report_with_managed(&before, &managed), "note": crate::settings::security_note() })));
         };
         let requested = crate::settings::parse_changes(set).map_err(|e| anyhow!(e))?;
         let fixed: Vec<&str> = crate::settings::overrides().iter().map(|(k, _, _)| *k).collect();
-        let writable: Vec<(String, String)> = requested.iter().filter(|(k, _)| !fixed.contains(&k.as_str())).cloned().collect();
-        let after = if writable.is_empty() {
-            before.clone()
+        let writable: Vec<(String, String)> = requested
+            .iter()
+            .filter(|(k, _)| !fixed.contains(&k.as_str()) && !managed.iter().any(|m| m == k))
+            .cloned()
+            .collect();
+        let (after, after_managed) = if writable.is_empty() {
+            (before.clone(), managed)
         } else {
             read(relay.ext_link(&link, "settings.set", json!({ "values": crate::settings::to_extension(&writable) })).await)?
         };
         crate::rlog!("settings.set", changes = writable.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>().join(","));
-        Ok(json_output(crate::settings::describe_changes(&before, &after, &requested)))
+        Ok(json_output(crate::settings::describe_changes_with_managed(&before, &after, &requested, &after_managed)))
     }
 }
 

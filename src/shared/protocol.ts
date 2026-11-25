@@ -18,8 +18,8 @@ export type AgentRelayStatus =
   /** The relay didn't pair: a wrong or used code, a revoked browser, an older relay, or a program posing as one. */
   | "untrusted"
 
-/** What the next connection pairs with: this browser's token for the relay, a code to exchange for one, or nothing. */
-export type PairingSource = "token" | "code" | "none"
+/** What the next connection pairs with: this browser's token for the relay, a code, local policy auto-pair, or nothing. */
+export type PairingSource = "token" | "code" | "local" | "none"
 
 export type AgentRelayState = {
   status: AgentRelayStatus

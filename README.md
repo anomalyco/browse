@@ -33,6 +33,7 @@ Other ways to install, all of which end in the same `browse install`:
 | npm | `npm i -g @opencode/browse`, then `browse install` | npm's global `browse`; browse runs `npm install -g` to update |
 | bun | `bun add -g @opencode/browse`, then `browse install` | `~/.bun/bin/browse`; browse runs `bun add -g` to update |
 | pnpm, yarn, volta | `pnpm add -g` / `yarn global add` / `volta install @opencode/browse`, then `browse install` | that manager's `browse`; updated with the same manager |
+| Nix / NixOS | `nix profile add github:anomalyco/browse` or `nixosModules.browse` | Nix store (auto-update disabled by default; updated through your flake) |
 
 There's always exactly one `browse`: a global package install is left to its package manager (nothing is copied next
 to it, and a leftover `~/.local/bin/browse` from an earlier install is removed), and agents run the same `browse` your
@@ -144,6 +145,46 @@ and the extension connects to it across the network:
 
 The connection isn't encrypted by browse; use a network that is (Tailscale or WireGuard), not the open internet.
 `browse set hostname 127.0.0.1` goes back to this computer only.
+
+### Nix / NixOS
+
+The flake provides the `browse` package (`packages.<system>.browse`, `overlays.default`) and a NixOS module (`nixosModules.browse`). The Nix package wraps `browse` with `OPENCODE_BROWSER_AUTO_UPDATE=off` and `OPENCODE_BROWSER_UPDATE_CHECK=0` by default so updates stay under Nix control.
+
+Extension settings can be managed declaratively through Chromium's managed storage policy (`chrome.storage.managed`, defined in `public/schema.json`). Policy values take precedence over local storage without modifying browser profile files, so removing an option from your Nix config cleanly reverts it.
+
+```nix
+{
+  inputs.browse.url = "github:anomalyco/browse";
+
+  outputs = { nixpkgs, browse, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      modules = [
+        browse.nixosModules.browse
+        {
+          programs.chromium.enable = true;
+          programs.browse = {
+            enable = true;
+            browsers = [ "chromium" ]; # writes /etc/chromium/policies/managed/opencode-browse.json (also read by Helium)
+            installExtension = true;   # adds the Web Store extension to programs.chromium.extensions
+            autoPairLocalRelay = true; # optional: zero-touch local loopback pairing (single-user machines only)
+            settings = {
+              window = "current";
+              grouping = "session";
+              groupCollapse = "auto";
+              idleMinutes = 30;
+              humanInput = "on";
+              muteTabs = "on";
+              handoffNotifications = "always";
+            };
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+Custom browser modules (such as Helium) or MCP configs can read `config.programs.browse.extensionId`, `config.programs.browse.extensionPolicy`, `config.programs.browse.browserPolicy`, and `config.programs.browse.environment`.
 
 ### Updates
 
@@ -346,6 +387,7 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
 | `OPENCODE_BROWSER_ALLOW_ALL_STORAGE=1` | Let tabs use every site's storage, and load resources from any host with your credentials |
 | `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Let `page.bringToFront()` in `execute` raise the tab and its window (off by default; `browse restart` after setting it) |
 | `OPENCODE_BROWSER_ALLOW_FILE_URLS=1` | Allow `file:` URLs |
+| `OPENCODE_BROWSER_AUTO_PAIR_LOCAL=1` | Allow unpaired local loopback extensions that also have the `autoPairLocalRelay` browser policy to exchange an ephemeral ECDH handshake for a per-browser token (single-user machines only) |
 | `OPENCODE_BROWSER_FILE_ROOTS` | More folders tools may read and write (path-list separated) |
 | `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in yours), overriding the options page; labelled tabs no longer follow their label's window |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed; overrides the options page |

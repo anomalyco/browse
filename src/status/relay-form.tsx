@@ -1,8 +1,9 @@
 // The relay address and pairing code form, on both pages: saves them, reconnects, and says how it went.
-import { createEffect, createSignal, Show } from "solid-js"
+import { createEffect, createSignal, onCleanup, Show } from "solid-js"
 import { Button } from "@opencode/ui/button"
 import { Field } from "@opencode/ui/field"
 import { TextInput } from "@opencode/ui/text-input"
+import { parseManagedValue, readManaged } from "../shared/policy"
 import { relayResultText, relayResultTone, type RelayResult } from "./describe"
 import { Note, Rich, type Relay } from "./ui"
 
@@ -13,6 +14,15 @@ export function RelayForm(props: { relay: Relay; help?: boolean; remote?: boolea
   const [edited, setEdited] = createSignal(false)
   const [pending, setPending] = createSignal(false)
   const [result, setResult] = createSignal<RelayResult>()
+  const [managedAddress, setManagedAddress] = createSignal<string>()
+
+  void readManaged("relayAddress").then((value) => setManagedAddress(() => value))
+  const policyChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+    if (area === "managed" && "relayAddress" in changes)
+      setManagedAddress(() => parseManagedValue("relayAddress", changes.relayAddress?.newValue))
+  }
+  chrome.storage.onChanged.addListener(policyChanged)
+  onCleanup(() => chrome.storage.onChanged.removeListener(policyChanged))
 
   // The field shows where the extension connects (the port the worker found a relay on, else localhost:19988),
   // unless the user is editing it.
@@ -50,7 +60,8 @@ export function RelayForm(props: { relay: Relay; help?: boolean; remote?: boolea
         <Field>
           <Field.Label>Relay address</Field.Label>
           <TextInput
-            value={address()}
+            value={managedAddress() ?? address()}
+            disabled={managedAddress() !== undefined}
             onInput={(event) => {
               setEdited(true)
               setAddress(event.currentTarget.value)
@@ -71,6 +82,9 @@ export function RelayForm(props: { relay: Relay; help?: boolean; remote?: boolea
           />
         </Field>
       </div>
+      <Show when={managedAddress() !== undefined}>
+        <Note tone="neutral">Relay address is set by browser policy.</Note>
+      </Show>
       <Show when={props.help}>
         <p class="hint">
           <Rich text="On the agent's computer, run `browse set hostname 0.0.0.0` and `browse pair`, then enter that computer's Tailscale IP or name and the code it prints. The code works once, within 10 minutes." />
