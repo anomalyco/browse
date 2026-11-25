@@ -264,6 +264,63 @@ pub fn diff_entries(previous: &[RenderedEntry], current: &[RenderedEntry]) -> Ve
     ops
 }
 
+/// The changed lines of a diff, and how many entries were added, removed and unchanged. A changed table row is
+/// preceded by its table's header row, unmarked, when the header itself didn't change, so its values keep their
+/// column names.
+fn diff_lines(previous: &[RenderedEntry], current: &[RenderedEntry]) -> (Vec<String>, usize, usize, usize) {
+    let ops = diff_entries(previous, current);
+    let prefixes = |entries: &[RenderedEntry]| entries.iter().map(|e| e.prefix.clone()).collect::<Vec<_>>();
+    let (prev, curr) = (prefixes(previous), prefixes(current));
+    let (mut changed_prev, mut changed_curr) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    let (mut i, mut j) = (0, 0);
+    for op in &ops {
+        match op {
+            DiffOp::Unchanged(_) => (i, j) = (i + 1, j + 1),
+            DiffOp::Removed(_) => {
+                changed_prev.insert(i);
+                i += 1;
+            }
+            DiffOp::Added(_) => {
+                changed_curr.insert(j);
+                j += 1;
+            }
+        }
+    }
+    let mut lines = Vec::new();
+    let mut headers = std::collections::HashSet::new();
+    let (mut added, mut removed, mut unchanged) = (0, 0, 0);
+    let (mut i, mut j) = (0, 0);
+    for op in ops {
+        let header = match &op {
+            DiffOp::Removed(_) => table_header(&prev, i).filter(|h| !changed_prev.contains(h)).map(|h| &previous[h]),
+            DiffOp::Added(_) => table_header(&curr, j).filter(|h| !changed_curr.contains(h)).map(|h| &current[h]),
+            DiffOp::Unchanged(_) => None,
+        };
+        if let Some(header) = header
+            && headers.insert(header.prefix.clone())
+        {
+            lines.push(format_diff_line(' ', header, None));
+        }
+        match op {
+            DiffOp::Unchanged(_) => {
+                unchanged += 1;
+                (i, j) = (i + 1, j + 1);
+            }
+            DiffOp::Removed(entry) => {
+                removed += 1;
+                i += 1;
+                lines.push(format_diff_line('-', &entry, None));
+            }
+            DiffOp::Added(entry) => {
+                added += 1;
+                j += 1;
+                lines.push(format_diff_line('+', &entry, entry.ref_id.as_deref()));
+            }
+        }
+    }
+    (lines, added, removed, unchanged)
+}
+
 enum Query {
     Text(String),
     Regex(regex_lite::Regex, String),
@@ -311,6 +368,7 @@ pub fn find_lines(lines: &[String], query: &str, context: Option<i64>) -> Result
         let start = index.saturating_sub(context);
         let end = (index + context).min(lines.len() - 1);
         included.extend(start..=end);
+        included.extend(table_header(lines, index));
     }
     let mut output = vec![format!("{} matching snapshot {}:", matches.len(), if matches.len() == 1 { "line" } else { "lines" })];
     let mut previous: Option<usize> = None;
@@ -322,6 +380,22 @@ pub fn find_lines(lines: &[String], query: &str, context: Option<i64>) -> Result
         previous = Some(index);
     }
     Ok(output.join("\n"))
+}
+
+/// For a table row line, the line of its table's first row: the header row, whose cells name the row's values.
+fn table_header(lines: &[String], index: usize) -> Option<usize> {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let line = &lines[index];
+    if !line.trim_start().starts_with("- row \"") {
+        return None;
+    }
+    let depth = indent(line);
+    let table = (0..index).rev().find(|&i| indent(&lines[i]) < depth)?;
+    if !lines[table].trim_start().starts_with("- table ") {
+        return None;
+    }
+    let first = table + 1;
+    (first < index && indent(&lines[first]) == depth && lines[first].trim_start().starts_with("- row \"")).then_some(first)
 }
 
 struct FrameNode {
@@ -837,20 +911,8 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
     }
     let previous_entries = compatible_previous.map(|p| p.entries).unwrap_or_default();
     let mut lines: Vec<String> = capture.notes.clone();
-    let (mut added, mut removed, mut unchanged) = (0, 0, 0);
-    for op in diff_entries(&previous_entries, &rendered) {
-        match op {
-            DiffOp::Unchanged(_) => unchanged += 1,
-            DiffOp::Removed(entry) => {
-                removed += 1;
-                lines.push(format_diff_line('-', &entry, None));
-            }
-            DiffOp::Added(entry) => {
-                added += 1;
-                lines.push(format_diff_line('+', &entry, entry.ref_id.as_deref()));
-            }
-        }
-    }
+    let (changes, added, removed, unchanged) = diff_lines(&previous_entries, &rendered);
+    lines.extend(changes);
     let plural = |n: usize, one: &str, many: &str| if n == 1 { one.to_string() } else { many.to_string() };
     lines.push(format!("{added} {}, {removed} {}, {unchanged} unchanged", plural(added, "addition", "additions"), plural(removed, "removal", "removals")));
     Ok(lines.join("\n"))
@@ -1118,6 +1180,32 @@ mod tests {
         assert!(ops.contains(&DiffOp::Removed(entry("- b"))));
         assert!(ops.contains(&DiffOp::Added(entry("  - d"))));
         assert_eq!(format_diff_line('+', &entry("  - d"), Some("e4")), "+   d [ref=e4]");
+    }
+
+    #[test]
+    fn table_rows_in_find_and_diff_bring_their_header_row() {
+        let table = |wins: &str| {
+            vec![
+                entry("- heading \"Teams\""),
+                entry("- table \"Table\""),
+                entry("  - row \"Team | Wins\""),
+                entry("  - row \"Islanders | 25\""),
+                entry(&format!("  - row \"Rangers | {wins}\"")),
+            ]
+        };
+        let lines: Vec<String> = table("36").iter().map(|e| format_line(e, None)).collect();
+        let found = find_lines(&lines, "Rangers", Some(0)).unwrap();
+        assert_eq!(found, "1 matching snapshot line:\n...\n  - row \"Team | Wins\"\n...\n  - row \"Rangers | 36\"");
+        assert_eq!(find_lines(&lines, "Teams", Some(0)).unwrap(), "1 matching snapshot line:\n...\n- heading \"Teams\"");
+
+        let (changes, added, removed, unchanged) = diff_lines(&table("36"), &table("37"));
+        assert_eq!(changes, vec!["    row \"Team | Wins\"", "-   row \"Rangers | 36\"", "+   row \"Rangers | 37\""]);
+        assert_eq!((added, removed, unchanged), (1, 1, 4));
+        // A header row that changed itself is shown once, as a change.
+        let mut renamed = table("36");
+        renamed[2] = entry("  - row \"Club | Wins\"");
+        let (changes, ..) = diff_lines(&table("36"), &renamed);
+        assert_eq!(changes, vec!["-   row \"Team | Wins\"", "+   row \"Club | Wins\""]);
     }
 
     #[test]
