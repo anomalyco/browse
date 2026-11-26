@@ -65,6 +65,7 @@ impl Cdp for FakeCdp {
 pub(crate) struct FakeBrowser {
     driver: Arc<dyn TabDriver>,
     state: Arc<TabState>,
+    labs: bool,
 }
 
 #[async_trait]
@@ -90,6 +91,9 @@ impl Browser for FakeBrowser {
     async fn read_only(&self, _: TabId) -> bool {
         false
     }
+    async fn lab_enabled(&self, _: TabId, _: &str) -> bool {
+        self.labs
+    }
 }
 
 fn tab() -> TabInfo {
@@ -97,8 +101,13 @@ fn tab() -> TabInfo {
 }
 
 pub(crate) fn context(cdp: Arc<FakeCdp>, roots: Vec<std::path::PathBuf>) -> ToolContext {
+    context_with_labs(cdp, roots, false)
+}
+
+/// A context whose browser has every Labs feature on (`labs`) or off.
+pub(crate) fn context_with_labs(cdp: Arc<FakeCdp>, roots: Vec<std::path::PathBuf>, labs: bool) -> ToolContext {
     let driver: Arc<dyn TabDriver> = browse_cdp::CdpTabDriver::new(cdp);
-    ToolContext { browser: Arc::new(FakeBrowser { driver, state: Arc::new(TabState::default()) }), file_roots: roots }
+    ToolContext { browser: Arc::new(FakeBrowser { driver, state: Arc::new(TabState::default()), labs }), file_roots: roots }
 }
 
 /// Calls a tool in the fake's one tab (`tab` 1 unless the arguments name one; `"tab": null` leaves it out).

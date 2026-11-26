@@ -244,8 +244,13 @@ export const HANDOFF_NOTIFICATIONS_KEY = "handoffNotifications"
 export type HandoffNotifications = "recording" | "always"
 export const handoffNotifications = (value: unknown): HandoffNotifications => (value === "always" ? "always" : "recording")
 
+/** browse Labs: experimental features, each "off" unless the user turns it on. pdf: agents can save pages as PDF. */
+export const LABS_PDF_KEY = "labsPdf"
+export type LabToggle = "on" | "off"
+export const labToggle = (value: unknown): LabToggle => (value === "on" ? "on" : "off")
+
 /** The settings the relay applies, sent to it after pairing and whenever they change (the `settings` event). */
-export type RelaySettings = { humanInput: HumanInput }
+export type RelaySettings = { humanInput: HumanInput; labs: { pdf: LabToggle } }
 
 /** Settings the relay's environment fixes, whatever the status page says (the relay's `relay.settings` answer). */
 export type RelayOverrides = { agentWindow?: "current" | "separate"; humanInput?: HumanInput }

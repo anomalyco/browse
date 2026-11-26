@@ -1,6 +1,6 @@
 // The settings page (settings.html, the extension's options page). One card: the connection's state at the top, then a
 // row per setting (this browser's name, where agent tabs open and how they're grouped, collapsed, muted and closed,
-// human-like input and handoff notifications, updates), then an Advanced section for the relay's address and pairing
+// human-like input and handoff notifications, labs, updates), then an Advanced section for the relay's address and pairing
 // code, reconnect and diagnostics. Each row is a chrome.storage.local key the background reads when it needs it (or
 // sends to the relay, for input); a setting the relay's environment fixes is shown as such.
 import { createSignal, Show, type JSX } from "solid-js"
@@ -20,6 +20,7 @@ import {
   HANDOFF_NOTIFICATIONS_KEY,
   HUMAN_INPUT_KEY,
   IDLE_MINUTES_KEY,
+  LABS_PDF_KEY,
   MUTE_TABS_KEY,
   agentGroupCollapse,
   agentGrouping,
@@ -28,6 +29,7 @@ import {
   handoffNotifications,
   humanInput,
   idleMinutesSetting,
+  labToggle,
   muteTabs,
   selfUpdatingInstall,
   type AgentGroupCollapse,
@@ -56,6 +58,7 @@ function Settings() {
   const [muted, setMuted] = createStored(MUTE_TABS_KEY, muteTabs)
   const [human, setHuman] = createStored(HUMAN_INPUT_KEY, humanInput)
   const [notifications, setNotifications] = createStored(HANDOFF_NOTIFICATIONS_KEY, handoffNotifications)
+  const [labsPdf, setLabsPdf] = createStored(LABS_PDF_KEY, labToggle)
   const [storedName] = createStored(BROWSER_NAME_KEY, (value) => (typeof value === "string" ? value : ""))
 
   const [name, setName] = createSignal<string>()
@@ -240,6 +243,17 @@ function Settings() {
           >
             <Switch hideLabel checked={notifications() === "always"} onChange={(on) => setNotifications(on ? "always" : "recording")}>
               Notify me on every handoff
+            </Switch>
+          </Row>
+        </Section>
+
+        <Section title="labs">
+          <Row
+            label="Save pages as PDF"
+            description="Experimental. Lets agents save a tab as a PDF file, laid out as the browser prints it. Restart your agent after turning it on."
+          >
+            <Switch hideLabel checked={labsPdf() === "on"} onChange={(on) => setLabsPdf(on ? "on" : "off")}>
+              Save pages as PDF
             </Switch>
           </Row>
         </Section>

@@ -1,5 +1,6 @@
-//! Capture tools: screenshots (labels, element clips, full page, diff), network capture with redaction, opt-in page
-//! console capture and screen recording (CDP screencast → MJPEG Matroska, optionally transcoded with ffmpeg).
+//! Capture tools: screenshots (labels, element clips, full page, diff), PDF export (Labs), network capture with
+//! redaction, opt-in page console capture and screen recording (CDP screencast → MJPEG Matroska, optionally transcoded
+//! with ffmpeg).
 //! Downloads aren't offered: Chrome refuses Page/Browser.setDownloadBehavior through chrome.debugger, and the browser
 //! may run on another machine than the relay. Everything runs over raw CDP through `ToolContext::browser`; nothing
 //! enables the Runtime or Console domains unless the agent starts a console capture.
@@ -16,6 +17,7 @@ mod labels;
 pub mod mkv;
 mod network;
 mod page;
+mod pdf;
 pub mod pixeldiff;
 pub mod redaction;
 mod recording;
@@ -31,6 +33,7 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(screenshot::ScreenshotTool),
         Arc::new(screenshot::ScreenshotDiffTool),
+        Arc::new(pdf::PdfTool),
         Arc::new(network::NetworkTool),
         Arc::new(console::ConsoleTool),
         Arc::new(recording::RecordingTool),

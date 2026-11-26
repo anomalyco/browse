@@ -12,8 +12,10 @@ import {
 } from "../agent-relay/protocol"
 import {
   HUMAN_INPUT_KEY,
+  LABS_PDF_KEY,
   MUTE_TABS_KEY,
   humanInput,
+  labToggle,
   muteTabs,
   RELAY_ADDRESS_KEY,
   type AgentRelayState,
@@ -301,11 +303,12 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   // The relay-side settings apply as soon as they change; the relay answers with what its environment fixes.
   const sendSettings = async () => {
     if (!open()) return
-    const stored = await chrome.storage.local.get([HUMAN_INPUT_KEY])
+    const stored = await chrome.storage.local.get([HUMAN_INPUT_KEY, LABS_PDF_KEY])
     const settings: RelaySettings = {
       humanInput: humanInput(stored[HUMAN_INPUT_KEY]),
+      labs: { pdf: labToggle(stored[LABS_PDF_KEY]) },
     }
-    log.add("settings", settings)
+    log.add("settings", { humanInput: settings.humanInput, labsPdf: settings.labs.pdf })
     send({ method: "settings", params: settings })
   }
 
@@ -608,7 +611,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (alarm.name === ALARM) void connect("alarm")
   })
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && HUMAN_INPUT_KEY in changes) void sendSettings()
+    if (area === "local" && (HUMAN_INPUT_KEY in changes || LABS_PDF_KEY in changes)) void sendSettings()
     if (area === "local" && MUTE_TABS_KEY in changes)
       void TabCleanup.setMuted(muteTabs(changes[MUTE_TABS_KEY]?.newValue) === "on").catch(() => undefined)
   })

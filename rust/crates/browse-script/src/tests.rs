@@ -72,7 +72,7 @@ impl Tool for Fake {
             // Without a tab, navigate opens tab 7.
             "navigate" => ToolOutput::text(json!({ "tab": args.get("tab").cloned().unwrap_or(json!(7)), "url": args["url"], "title": "T", "status": 200, "navigated": true }).to_string()),
             // Echo the upload args so a test can see what setInputFiles hands the tool.
-            "upload" => ToolOutput::text(args.to_string()),
+            "upload" | "pdf" => ToolOutput::text(args.to_string()),
             "cut" => ToolOutput { structured_content: Some(json!({ "value": null, "truncated": "the result is 300002 characters" })), ..ToolOutput::text("\"xxxx\n… [truncated: the result is 300002 characters]") },
             "handoff" => {
                 tokio::time::sleep(Duration::from_millis(args["ms"].as_u64().unwrap_or(0))).await;
@@ -94,7 +94,7 @@ fn front_context() -> (ToolContext, Arc<Front>) {
 }
 
 fn execute() -> Arc<dyn Tool> {
-    let fakes: Vec<Arc<dyn Tool>> = ["echo", "fail", "picture", "navigate", "handoff", "upload", "cut"].into_iter().map(|n| Arc::new(Fake(n)) as Arc<dyn Tool>).collect();
+    let fakes: Vec<Arc<dyn Tool>> = ["echo", "fail", "picture", "navigate", "handoff", "upload", "cut", "pdf"].into_iter().map(|n| Arc::new(Fake(n)) as Arc<dyn Tool>).collect();
     crate::tools(&fakes).remove(0)
 }
 
@@ -299,4 +299,23 @@ async fn handoff_pauses_the_timeout() {
     let (text, output) = run_in(&context(), json!({ "code": "await browse.handoff({ ms: 600 }); return 'after'", "timeoutMs": 300 })).await;
     assert!(!output.is_error, "{text}");
     assert!(text.starts_with("after") && text.contains("1 handoff"), "{text}");
+}
+
+#[tokio::test]
+async fn page_pdf_passes_playwright_lengths_in_inches() {
+    let (text, output) = run_in(
+        &context(),
+        json!({ "tab": 7, "code": "return await page.pdf({ path: 'a.pdf', width: '210mm', height: 960, margin: { top: '1in', left: '2.54cm' }, landscape: true })" }),
+    )
+    .await;
+    assert!(!output.is_error, "{text}");
+    let args: Value = serde_json::from_str(text.lines().find(|line| line.starts_with('{')).unwrap()).unwrap();
+    assert_eq!(args["path"], "a.pdf");
+    assert_eq!(args["tab"], 7);
+    assert!((args["width"].as_f64().unwrap() - 210.0 / 25.4).abs() < 1e-9, "{args}");
+    assert_eq!(args["height"].as_f64(), Some(10.0));
+    assert_eq!((args["margin"]["top"].as_f64(), args["margin"]["left"].as_f64(), args["margin"].get("right")), (Some(1.0), Some(1.0), None));
+    assert_eq!(args["landscape"], true);
+    assert!(err("await page.pdf({})").await.contains("pass path"));
+    assert!(err("await page.pdf({ path: 'a.pdf', width: 'wide' })").await.contains("width must be"));
 }

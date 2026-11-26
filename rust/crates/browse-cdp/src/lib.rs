@@ -13,6 +13,7 @@
 mod console;
 mod input;
 mod network;
+mod pdf;
 mod raster;
 mod screencast;
 pub mod wire;
@@ -31,7 +32,7 @@ use browse_core::{
     Arg, BodyKind, CallOptions, CaptureDriver, CloseReason, ConsoleEvent, Dialog, DialogKind, DocumentId, DragOutcome,
     DriverError, DriverResult, Emulation, Eval, Evaluated, FileChooser, FileChooserArm, Frame, FrameId, Image,
     ImageFormat, JsError, KeyEvent, LoadState, Modifiers, MouseButton, NavigationError, NavigationErrorKind,
-    NavigationId, NetworkEvent, NetworkOptions, PageEvent, PointerEvent, PointerStep, Realm, Receiver, RemoteRef, RequestId,
+    NavigationId, NetworkEvent, NetworkOptions, PageEvent, PdfOptions, PointerEvent, PointerStep, Realm, Receiver, RemoteRef, RequestId,
     Returns, Screencast,
     ScreencastFrame, ScreencastOptions, Screenshot, ScreenshotArea, Subscription, TabDriver, Viewport, World,
 };
@@ -1881,6 +1882,17 @@ impl TabDriver for CdpTabDriver {
         })
         .await;
         Ok(())
+    }
+
+    async fn print_pdf(&self, options: PdfOptions) -> DriverResult<Vec<u8>> {
+        let result = self.shared.cdp.send("Page.printToPDF", pdf::params(&options), None).await.map_err(map_cdp_error)?;
+        let data = result
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| DriverError::Protocol("Chrome returned no PDF".into()))?;
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|error| DriverError::Protocol(format!("invalid PDF data: {error}")))
     }
 
     fn capture(&self) -> &dyn CaptureDriver {

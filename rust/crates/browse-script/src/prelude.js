@@ -373,6 +373,14 @@
     FrameLocator.prototype[name] = function (...args) { return this._inner(build(...args)) }
   }
 
+  // A Playwright page.pdf() length (a number of CSS pixels, or a string in px, in, cm or mm) in inches.
+  function inches(value, name) {
+    if (value === undefined || value === null || value === "") return undefined
+    const match = /^\s*([0-9]*\.?[0-9]+)\s*(px|in|cm|mm)?\s*$/.exec(String(value))
+    if (!match) throw makeError(`page.pdf(): ${name} must be a number of pixels or a length like "1in", "2cm", "10mm" or "96px"`)
+    const per = { px: 96, in: 1, cm: 2.54, mm: 25.4 }[match[2] || "px"]
+    return Number(match[1]) / per
+  }
   function unsupported(name, instead) {
     throw new Error(`${name} is not supported in browse's execute; ${instead}`)
   }
@@ -591,7 +599,13 @@
       this._closed = true
     }
     async pause() { warn("page.pause() does nothing in execute; use handoff() to let the user act") }
-    pdf() { unsupported("page.pdf()", "take page.screenshot({ fullPage: true }) instead") }
+    // browse Labs: the pdf tool refuses (pointing to a full-page screenshot) unless the user turned it on.
+    async pdf(options = {}) {
+      if (!options.path) throw makeError("page.pdf(): pass path, where to save the PDF (it isn't returned as bytes)")
+      if (options.headerTemplate || options.footerTemplate || options.displayHeaderFooter || options.outline || options.tagged) warn("page.pdf: headers, footers, outline and tagged are ignored")
+      const margin = options.margin && Object.fromEntries(["top", "right", "bottom", "left"].map((side) => [side, inches(options.margin[side], `margin.${side}`)]))
+      return tool("pdf", this._args({ path: options.path, format: options.format, width: inches(options.width, "width"), height: inches(options.height, "height"), landscape: options.landscape, margin, scale: options.scale, printBackground: options.printBackground, pageRanges: options.pageRanges || undefined, preferCSSPageSize: options.preferCSSPageSize }))
+    }
     route() { unsupported("page.route()", "requests can't be intercepted; use network.start() to observe them") }
     unroute() { return Promise.resolve() }
     setExtraHTTPHeaders() { unsupported("page.setExtraHTTPHeaders()", "headers can't be changed") }

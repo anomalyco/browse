@@ -587,6 +587,22 @@ pub struct Image {
     pub note: Option<String>,
 }
 
+/// How to print a page to PDF. Lengths are inches; `None` leaves the browser's default.
+#[derive(Debug, Clone, Default)]
+pub struct PdfOptions {
+    pub landscape: bool,
+    pub background: bool,
+    pub scale: Option<f64>,
+    /// Paper width and height.
+    pub paper: Option<(f64, f64)>,
+    /// Top, right, bottom, left.
+    pub margins: Option<(f64, f64, f64, f64)>,
+    /// Pages to print, like "1-3, 5".
+    pub page_ranges: Option<String>,
+    /// Use the page's CSS `@page` size over `paper`.
+    pub prefer_css_page_size: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ViewportOverride {
     pub width: u64,
@@ -862,6 +878,11 @@ pub trait TabDriver: Send + Sync {
         Err(DriverError::Unsupported("interrupt"))
     }
 
+    /// The page printed as PDF bytes, as the browser's print would lay it out.
+    async fn print_pdf(&self, _options: PdfOptions) -> DriverResult<Vec<u8>> {
+        Err(DriverError::Unsupported("printing to PDF"))
+    }
+
     fn capture(&self) -> &dyn CaptureDriver;
 }
 
@@ -1047,6 +1068,11 @@ impl TabDriver for GuardedTabDriver {
 
     async fn interrupt(&self, frame: Option<&FrameId>) -> DriverResult<()> {
         self.inner.interrupt(frame).await
+    }
+
+    /// Reads the page like a screenshot, so read-only tabs may print too.
+    async fn print_pdf(&self, options: PdfOptions) -> DriverResult<Vec<u8>> {
+        self.inner.print_pdf(options).await
     }
 
     fn capture(&self) -> &dyn CaptureDriver {

@@ -486,7 +486,7 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
                 .iter()
                 .map(|t| t.spec())
                 .collect();
-            let specs = crate::surface::tools(client.as_deref(), specs);
+            let specs = crate::surface::labs(crate::surface::tools(client.as_deref(), specs), |lab| relay.lab_on_anywhere(lab));
             json_response(StatusCode::OK, &serde_json::to_value(specs).unwrap_or_default())
         }
         ("GET", "/instructions") => json_response(StatusCode::OK, &json!({ "instructions": crate::surface::instructions(client.as_deref().unwrap_or_default()) })),

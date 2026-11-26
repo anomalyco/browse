@@ -11,7 +11,7 @@ pub use driver::{
     Dialog, DialogKind, DocumentId, DragOutcome, DriverError, DriverInfo, DriverResult, Emulation, Eval, Evaluated,
     FileChooser, FileChooserArm, Frame, FrameId, Geolocation, GuardedTabDriver, Image, ImageFormat, JsError, KeyEvent,
     LoadState, MediaFeature, MediaOverride, Modifiers, MouseButton, NavigationError, NavigationErrorKind, NavigationId,
-    NetworkEvent, NetworkOptions, NetworkRequest, PageEvent, PointerEvent, PointerStep, Realm, Receiver, Rect, RemoteRef,
+    NetworkEvent, NetworkOptions, NetworkRequest, PageEvent, PdfOptions, PointerEvent, PointerStep, Realm, Receiver, Rect, RemoteRef,
     RequestId,
     ResponseHead, Returns, Screencast, ScreencastFrame, ScreencastOptions, Screenshot, ScreenshotArea, Subscription,
     TabDriver, TabPolicy, TargetId, UserPresence, Viewport, ViewportOverride, World,
@@ -202,6 +202,10 @@ pub trait Browser: Send + Sync {
         true
     }
     async fn connected_locally(&self, _tab: TabId) -> bool {
+        false
+    }
+    /// Whether the user turned on the Labs feature `lab` (like "pdf") for the browser the tab is in. Off by default.
+    async fn lab_enabled(&self, _tab: TabId, _lab: &str) -> bool {
         false
     }
     async fn read_only(&self, tab: TabId) -> bool;

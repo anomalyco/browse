@@ -653,6 +653,11 @@ impl Browser for RelayBrowser {
         }
     }
 
+    async fn lab_enabled(&self, tab: TabId, lab: &str) -> bool {
+        let link = self.0.st().browser_tab(tab).map(|(link, _)| link);
+        link.is_some_and(|link| link.lab_enabled(lab))
+    }
+
     async fn connected_locally(&self, tab: TabId) -> bool {
         let st = self.0.st();
         if let Some(entry) = st.tabs.get(&tab).and_then(|t| t.backend.direct()) {

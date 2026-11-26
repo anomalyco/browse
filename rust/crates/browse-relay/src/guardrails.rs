@@ -30,6 +30,7 @@ const READ_ONLY_ALLOWED: &[&str] = &[
     "Page.getNavigationHistory",
     "Page.getResourceTree",
     "Page.captureScreenshot",
+    "Page.printToPDF",
     "Page.addScriptToEvaluateOnNewDocument",
     "Page.createIsolatedWorld",
     "Page.setLifecycleEventsEnabled",

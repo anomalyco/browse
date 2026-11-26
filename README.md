@@ -243,6 +243,9 @@ extension from your browser to finish.
   as you set them (a handoff still opens its group so you can find the tab), when idle tabs close (10, 30, 60 minutes
   or never), whether agent tabs open muted, human-like input, and handoff notifications. Agents can read and change
   these with the `settings` tool when you ask them to.
+- **Labs** (under **labs** on the options page, each off until you turn it on): experimental features. **Save pages
+  as PDF** gives agents the `pdf` tool and `page.pdf()` in `execute`. Restart your agent after turning one on so it
+  sees the new tool. Labs features only work in browsers that have the browse extension.
 
 ## Tools
 
@@ -257,6 +260,7 @@ OpenCode, which composes tools in code mode, gets the plain tools. Every other M
 | `click`, `fill`, `type`, `press`, `select`, `hover`, `drag`, `scroll` | Act on a ref, selector or point, with human-like input |
 | `wait_for`, `dialog`, `upload`, `eval` | Wait for text, a URL or an element; answer dialogs; set files on an input or a button that opens the file chooser; run JavaScript in the page |
 | `screenshot`, `screenshot_diff` | The viewport, full page, an element or a rectangle; compare with a baseline |
+| `pdf` | Labs, off by default: save the tab as a PDF file as the browser prints it (paper size, margins, scale, page ranges); works in read-only tabs |
 | `network`, `console` | Capture a tab's traffic (credentials redacted) or its console messages and errors |
 | `recording` | Record a tab to a video file |
 | `emulate`, `webmcp` | Viewport, color scheme, user agent, geolocation and more; tools a page offers through WebMCP |

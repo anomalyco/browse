@@ -540,6 +540,13 @@ impl Relay {
             Some("off") => *link.human_input.lock().unwrap() = Some(false),
             _ => {}
         }
+        if let Some(labs) = params.get("labs").and_then(Value::as_object) {
+            *link.labs.lock().unwrap() = crate::settings::LABS
+                .iter()
+                .filter(|lab| labs.get(**lab).and_then(Value::as_str) == Some("on"))
+                .map(|lab| lab.to_string())
+                .collect();
+        }
         if let Some(mode) = params.get("autoUpdate").and_then(Value::as_str).filter(|m| matches!(*m, "on" | "notify" | "off")) {
             self.store_auto_update_mode(mode);
             rlog!("autoupdate.mode", mode = mode);
@@ -550,6 +557,11 @@ impl Relay {
         } else {
             link.pending_relay_settings.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+
+    /// Whether a connected browser has the Labs feature `lab` on.
+    pub fn lab_on_anywhere(&self, lab: &str) -> bool {
+        self.st().links.iter().any(|link| link.connected() && link.lab_enabled(lab))
     }
 
     pub fn human_input_for_link(&self, link: &Link) -> bool {

@@ -5,6 +5,10 @@ use serde_json::{Map, Value, json};
 
 pub const AGENT_KEYS: [&str; 7] = ["window", "grouping", "groupCollapse", "idleMinutes", "humanInput", "muteTabs", "handoffNotifications"];
 
+/// Labs features: off unless the user turns them on in the extension's options page (the `labs` of its `settings`
+/// event). Their tools are left out of tool lists, and refuse, while off in every connected browser.
+pub const LABS: [&str; 1] = ["pdf"];
+
 pub struct Spec {
     pub label: &'static str,
     pub values: &'static [&'static str],
