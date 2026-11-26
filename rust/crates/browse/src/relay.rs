@@ -385,7 +385,8 @@ pub fn local_specs() -> Vec<ToolSpec> {
 
 /// A running relay's tools for `client` (authoritative), else this build's, without starting a relay.
 pub fn specs(client: Option<&str>) -> Vec<ToolSpec> {
-    let local = || browse_relay::surface::tools(client, local_specs());
+    // Without a relay no browser says which Labs features are on: they're off.
+    let local = || browse_relay::surface::labs(browse_relay::surface::tools(client, local_specs()), |_| false);
     match probe() {
         Probe::Running(_) => tools(client).unwrap_or_else(|_| local()),
         _ => local(),

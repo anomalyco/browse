@@ -42,6 +42,11 @@ pub fn tools(client: Option<&str>, specs: Vec<ToolSpec>) -> Vec<ToolSpec> {
     }
 }
 
+/// Leaves out the tools of Labs features that are off (`on` says which are on).
+pub fn labs(specs: Vec<ToolSpec>, on: impl Fn(&str) -> bool) -> Vec<ToolSpec> {
+    specs.into_iter().filter(|spec| !crate::settings::LABS.contains(&spec.name.as_str()) || on(&spec.name)).collect()
+}
+
 /// The MCP server instructions for a client.
 pub fn instructions(client: &str) -> &'static str {
     match for_client(client) {
@@ -57,6 +62,14 @@ mod tests {
 
     fn spec(name: &str) -> ToolSpec {
         ToolSpec { name: name.into(), description: String::new(), input_schema: json!({}), output_schema: None }
+    }
+
+    #[test]
+    fn labs_tools_are_listed_only_when_on() {
+        let all = || ["navigate", "pdf"].map(spec).to_vec();
+        let names = |list: Vec<ToolSpec>| list.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names(labs(all(), |_| false)), ["navigate"]);
+        assert_eq!(names(labs(all(), |lab| lab == "pdf")), ["navigate", "pdf"]);
     }
 
     #[test]

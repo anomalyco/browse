@@ -234,3 +234,25 @@ async fn every_capture_needs_a_tab() {
         assert!(text.as_str().is_some_and(|t| t.contains("Pass `tab`")), "{name}: {text}");
     }
 }
+
+#[tokio::test]
+async fn pdf_refuses_while_its_lab_is_off_and_saves_when_on() {
+    use base64::Engine;
+    let cdp = FakeCdp::new();
+    cdp.reply("Page.printToPDF", json!({ "data": base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4") }));
+    let root = private_root("pdf");
+    let pdf = tool("pdf");
+
+    let off = crate::testing::context_with_labs(cdp.clone(), vec![root.clone()], false);
+    let (error, value) = call(&off, pdf.as_ref(), json!({ "path": "page.pdf" })).await;
+    assert!(error && value.as_str().unwrap().contains("Labs"), "{value}");
+    assert!(cdp.calls("Page.printToPDF").is_empty());
+
+    let on = crate::testing::context_with_labs(cdp.clone(), vec![root.clone()], true);
+    let (error, value) = call(&on, pdf.as_ref(), json!({ "path": "page.pdf", "format": "Letter" })).await;
+    assert!(!error, "{value}");
+    assert_eq!(value["bytes"], 8);
+    assert_eq!(std::fs::read(value["path"].as_str().unwrap()).unwrap(), b"%PDF-1.4");
+    assert_eq!(cdp.calls("Page.printToPDF")[0].0["paperWidth"], 8.5);
+    std::fs::remove_dir_all(root).unwrap();
+}

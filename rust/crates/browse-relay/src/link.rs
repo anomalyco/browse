@@ -91,6 +91,8 @@ pub struct Link {
     probing: AtomicBool,
     pub pong: Notify,
     pub human_input: Mutex<Option<bool>>,
+    /// The Labs features the user turned on in this browser's options page (like "pdf").
+    pub labs: Mutex<HashSet<String>>,
     pub pending_relay_settings: AtomicBool,
     pub announced: Mutex<HashSet<i64>>,
     pub announced_agent: Mutex<HashSet<i64>>,
@@ -139,6 +141,7 @@ impl Link {
             probing: AtomicBool::new(false),
             pong: Notify::new(),
             human_input: Mutex::new(None),
+            labs: Mutex::new(HashSet::new()),
             pending_relay_settings: AtomicBool::new(false),
             announced: Mutex::new(HashSet::new()),
             announced_agent: Mutex::new(HashSet::new()),
@@ -191,6 +194,10 @@ impl Link {
 
     pub fn human_input(&self) -> Option<bool> {
         *self.human_input.lock().unwrap()
+    }
+
+    pub fn lab_enabled(&self, lab: &str) -> bool {
+        self.labs.lock().unwrap().contains(lab)
     }
 
     pub fn send_raw(&self, value: &Value) {

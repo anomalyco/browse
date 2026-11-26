@@ -97,7 +97,7 @@ beforeEach(async () => {
   stub.state.activations.length = 0
   stub.state.focusedWindowId = undefined
   socket().received.length = 0
-  await stub.chrome.storage.local.remove(["agentTabsWindow", "agentTabsGrouping", "agentTabsGroupCollapse", "humanInput", "muteTabs", "tabCleanupIdleMinutes", "handoffNotifications"])
+  await stub.chrome.storage.local.remove(["agentTabsWindow", "agentTabsGrouping", "agentTabsGroupCollapse", "humanInput", "muteTabs", "tabCleanupIdleMinutes", "handoffNotifications", "labsPdf"])
   await stub.chrome.storage.session.remove("agentWindowId")
   stub.state.notifications.clear()
   stub.state.notificationCreates = 0
@@ -632,13 +632,21 @@ describe("relay settings", () => {
     // The first connection's settings went out with pairing (beforeEach cleared the log); ask again.
     await stub.chrome.storage.local.set({ humanInput: "off" })
     await until(() => settings().length === 1)
-    expect(settings()[0]).toEqual({ humanInput: "off" })
+    expect(settings()[0]).toEqual({ humanInput: "off", labs: { pdf: "off" } })
     await stub.chrome.storage.local.set({ humanInput: "on" })
     await until(() => settings().length === 2)
-    expect(settings()[1]).toEqual({ humanInput: "on" })
+    expect(settings()[1]).toEqual({ humanInput: "on", labs: { pdf: "off" } })
     await stub.chrome.storage.local.set({ humanInput: 3 })
     await until(() => settings().length === 3)
-    expect(settings()[2]).toEqual({ humanInput: "on" })
+    expect(settings()[2]).toEqual({ humanInput: "on", labs: { pdf: "off" } })
+  })
+
+  test("browse Labs features go to the relay off unless turned on", async () => {
+    const last = () => JSON.stringify(settings().at(-1))
+    await stub.chrome.storage.local.set({ labsPdf: "on" })
+    await until(() => last() === JSON.stringify({ humanInput: "on", labs: { pdf: "on" } }))
+    await stub.chrome.storage.local.set({ labsPdf: "maybe" })
+    await until(() => last() === JSON.stringify({ humanInput: "on", labs: { pdf: "off" } }))
   })
 
   test("the relay's overrides show on the status page; unknown ones are dropped, and they go with the connection", async () => {
@@ -680,7 +688,7 @@ describe("the relay's settings tool", () => {
     })
     expect(pageSaw).toEqual([{ agentTabsGrouping: "shared", agentTabsGroupCollapse: "off", muteTabs: "on", humanInput: "off", tabCleanupIdleMinutes: 0, handoffNotifications: "always" }])
     await until(() => settings().length === 1)
-    expect(settings()[0]).toEqual({ humanInput: "off" })
+    expect(settings()[0]).toEqual({ humanInput: "off", labs: { pdf: "off" } })
     await userWindow()
     const agent = await agentTab("github")
     expect(group(agent.groupId)!.title).toBe(`Agents · 1${MARKER}${MARKER}`)
