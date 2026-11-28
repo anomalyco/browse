@@ -3,8 +3,9 @@
   <img src="assets/banner-light.png" alt="browse: let your AI agents use your real browser. An isometric desk computer whose screen shows a web browser with an agent's tab group, cabled to a small relay box.">
 </picture>
 
-Let your AI agents use your real browser: your tabs, your logins, your extensions. A small native MCP server and a
-Chromium extension, for [OpenCode](https://opencode.ai), Claude Code, Codex, Cursor and any other MCP client.
+Let your AI agents use your real browser: your tabs, your logins, your extensions. A small native MCP server, with a
+Chromium extension and direct WebDriver BiDi support for Firefox-family browsers, for [OpenCode](https://opencode.ai),
+Claude Code, Codex, Cursor and any other MCP client.
 
 ---
 
@@ -12,7 +13,8 @@ Agents get a `browse` MCP server. They open tabs in the background, read pages, 
 capture network traffic and record the screen, in tabs grouped out of your way. When it's your turn (a login, a 2FA
 prompt, a payment), they hand the tab back to you and continue once you click **Continue**.
 
-It works in Chrome, Edge, Brave, Arc, Helium, Vivaldi, Opera and Chromium.
+It works in Chrome, Edge, Brave, Arc, Helium, Vivaldi, Opera and Chromium (via the extension), and in Firefox, Firefox
+Developer Edition, Firefox Nightly and Zen (directly over WebDriver BiDi, no extension needed).
 
 ## Install
 
@@ -130,6 +132,25 @@ There's nothing to sign in to. Each browser pairs with browse once and gets a ke
 prints a one-time code (`XXXX-XXXX`, good for 10 minutes) and waits. Open **Extensions → browse → Options**, expand
 **advanced** (or click **Pair with a code**), enter the code under **Pairing code** and click **Connect**. `browse pair
 --list` shows paired browsers; `browse pair --revoke <browser>` unpairs one.
+
+### Firefox
+
+Firefox-family browsers (Firefox, Firefox Developer Edition, Firefox Nightly and Zen) don't need an extension — browse
+connects directly over WebDriver BiDi:
+
+```sh
+browse firefox                    # connect your real Firefox profile (starts it with remote control if closed)
+browse firefox --relaunch         # restart an already-open Firefox with remote control (tabs restore; private windows don't)
+browse firefox --dedicated        # open a separate clean browse profile instead of touching your running Firefox
+browse firefox --headless         # dedicated headless profile (browse disconnect quits it)
+browse firefox --app zen          # pick a specific app (firefox, dev, nightly, zen, or a path)
+browse disconnect                 # disconnect a directly driven browser
+```
+
+You can also pass `--firefox` to `browse install` to connect a Firefox-family browser instead of the Chrome extension.
+While browse drives Firefox, Firefox shows a robot icon in the address bar and pages see `navigator.webdriver = true`.
+Both Chrome (extension) and Firefox (BiDi) can be connected at the same time; pass `browser` to `navigate` or `tabs new`
+(from `status`) to pick one.
 
 ### Browser on another computer
 
@@ -286,9 +307,10 @@ The agent starts `browse mcp`, a small stdio proxy, which starts the relay on de
 `127.0.0.1:19988` (or the next free port from 19990–19997 when another program holds it). The extension connects to
 the relay over a WebSocket and runs its commands in your browser through `chrome.debugger`.
 
-- **The relay** (`browse serve`, in `rust/`) keeps agent tabs, handoffs, recordings and network captures, talks the
-  Chrome DevTools Protocol to each tab, and runs `execute` scripts in an embedded JavaScript engine (QuickJS). It
-  runs until it's stopped (`browse restart`, `browse uninstall`, a signal) or restarts onto an update.
+- **The relay** (`browse serve`, in `rust/`) keeps agent tabs, handoffs, recordings and network captures, drives
+  each tab through a protocol driver (Chrome DevTools Protocol via the extension, or WebDriver BiDi directly for
+  Firefox-family browsers), and runs `execute` scripts in an embedded JavaScript engine (QuickJS). It runs until it's
+  stopped (`browse restart`, `browse uninstall`, a signal) or restarts onto an update.
 - **The extension** (`src/`) runs the relay's commands through `chrome.debugger`, keeps agent tabs in collapsed groups
   by default (or their own window), closes idle ones, and shows the toolbar badge and the handoff card.
 - **Quiet in the page.** browse doesn't enable the CDP domains pages can detect, runs its own code in isolated worlds
