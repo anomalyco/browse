@@ -738,7 +738,7 @@ async fn the_relay_attaches_a_recorded_profile_while_it_listens() {
     let server = format!("{{\"ws_host\":\"127.0.0.1\",\"ws_port\":{port}}}");
     std::fs::write(profile.join("WebDriverBiDiServer.json"), &server).unwrap();
     std::fs::write(stranger.join("WebDriverBiDiServer.json"), &server).unwrap();
-    let record = RecordedFirefox { app: "zen".into(), exe: "/x/zen".into(), profile: profile.clone(), dedicated: false, headless: false, name: Some("Zen".into()), prefs_added: false };
+    let record = RecordedFirefox { app: "zen".into(), exe: "/x/zen".into(), profile: profile.clone(), endpoint: None, dedicated: false, headless: false, name: Some("Zen".into()), prefs_added: false };
     firefox::record(&h.paths, record).unwrap();
 
     // Not running: a stale server file is nothing to connect to.
@@ -789,7 +789,7 @@ async fn a_recorded_profile_held_by_another_client_says_so_in_next_step() {
         }
     });
     std::fs::write(profile.join("WebDriverBiDiServer.json"), format!("{{\"ws_host\":\"127.0.0.1\",\"ws_port\":{port}}}")).unwrap();
-    firefox::record(&h.paths, RecordedFirefox { app: "firefox".into(), exe: "/x".into(), profile: profile.clone(), dedicated: false, headless: false, name: None, prefs_added: false }).unwrap();
+    firefox::record(&h.paths, RecordedFirefox { app: "firefox".into(), exe: "/x".into(), profile: profile.clone(), endpoint: None, dedicated: false, headless: false, name: None, prefs_added: false }).unwrap();
     let holder = firefox::tests::Holder::start(&profile);
     *relay.auto_attached.lock().unwrap() = None;
     relay.auto_attach_firefox().await;

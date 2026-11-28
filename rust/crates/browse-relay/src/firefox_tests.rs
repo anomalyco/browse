@@ -108,7 +108,7 @@ fn selection_follows_its_order() {
         other => panic!("{other:?}"),
     }
 
-    let record = RecordedFirefox { app: "firefox".into(), exe: "/x".into(), profile: work.clone(), dedicated: false, headless: false, name: None, prefs_added: true };
+    let record = RecordedFirefox { app: "firefox".into(), exe: "/x".into(), profile: work.clone(), endpoint: None, dedicated: false, headless: false, name: None, prefs_added: true };
     let zen = RecordedFirefox { app: "zen".into(), profile: legacy.clone(), ..record.clone() };
     let recorded = select_profile(AppKind::Firefox, None, &[zen.clone(), record.clone()], all(), &s.0, |_| ProfileState::NotRunning).unwrap();
     assert_eq!((recorded.dir.clone(), recorded.how), (work.clone(), Chosen::Recorded));
@@ -357,7 +357,7 @@ fn recorded_profiles_round_trip() {
     let s = Scratch::new("recorded");
     let paths = Paths::rooted(s.0.clone());
     assert!(read_recorded(&paths).is_empty());
-    let one = RecordedFirefox { app: "firefox".into(), exe: "/x/firefox".into(), profile: s.0.join("a"), dedicated: false, headless: false, name: Some("Firefox".into()), prefs_added: true };
+    let one = RecordedFirefox { app: "firefox".into(), exe: "/x/firefox".into(), profile: s.0.join("a"), endpoint: None, dedicated: false, headless: false, name: Some("Firefox".into()), prefs_added: true };
     let two = RecordedFirefox { app: "zen".into(), profile: s.0.join("b"), dedicated: true, headless: true, prefs_added: false, name: None, ..one.clone() };
     record(&paths, one.clone()).unwrap();
     record(&paths, two.clone()).unwrap();
@@ -371,6 +371,28 @@ fn recorded_profiles_round_trip() {
     assert!(!recorded_path(&paths).exists(), "the last one removes the file");
     assert_eq!(dedicated_profile(&paths, AppKind::Zen), s.0.join("profiles/zen"));
     assert_eq!(driver_key(Path::new("/p/x")), "driver:bidi:/p/x");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("ws://127.0.0.1:{port}/session");
+    assert!(live_endpoint(&url));
+    assert!(!live_endpoint("ws://example.com:4444/session"));
+    let app_only = RecordedFirefox {
+        app: "firefox".into(),
+        exe: "/Applications/Firefox.app".into(),
+        profile: PathBuf::new(),
+        endpoint: Some(url.clone()),
+        dedicated: false,
+        headless: false,
+        name: Some("Firefox".into()),
+        prefs_added: false,
+    };
+    assert_eq!(app_only.driver_key(), "driver:bidi:app:firefox");
+    record(&paths, app_only.clone()).unwrap();
+    assert_eq!(read_recorded(&paths), std::slice::from_ref(&app_only));
+    assert_eq!(forget_key(&paths, &app_only.driver_key()).unwrap(), Some(app_only));
+    drop(listener);
+    assert!(!live_endpoint(&url));
 }
 
 #[test]
@@ -386,7 +408,7 @@ fn the_next_step_hint_names_firefox_only_when_it_is_installed() {
     assert_eq!(next_step_hint(Some(&discovery), &[], &[]).unwrap(), " Or run `browse firefox` to connect Firefox.");
     discovery.app_dirs.clear();
     let profile = mkdir(&s.0.join("p"));
-    let recorded = [RecordedFirefox { app: "firefox".into(), exe: "/x".into(), profile, dedicated: false, headless: false, name: None, prefs_added: false }];
+    let recorded = [RecordedFirefox { app: "firefox".into(), exe: "/x".into(), profile, endpoint: None, dedicated: false, headless: false, name: None, prefs_added: false }];
     assert_eq!(next_step_hint(Some(&discovery), &recorded, &[]), None, "a recorded profile that isn't running needs nothing");
 }
 
@@ -395,7 +417,7 @@ fn the_next_step_hint_names_firefox_only_when_it_is_installed() {
 fn the_next_step_hint_says_what_a_recorded_profile_needs() {
     let s = Scratch::new("hint-running");
     let profile = mkdir(&s.0.join("p"));
-    let recorded = [RecordedFirefox { app: "zen".into(), exe: "/x".into(), profile: profile.clone(), dedicated: false, headless: false, name: None, prefs_added: false }];
+    let recorded = [RecordedFirefox { app: "zen".into(), exe: "/x".into(), profile: profile.clone(), endpoint: None, dedicated: false, headless: false, name: None, prefs_added: false }];
     let holder = Holder::start(&profile);
     let hint = next_step_hint(None, &recorded, &[]).unwrap();
     assert!(hint.contains("Zen is open without remote control") && hint.contains("--relaunch") && hint.contains("--dedicated"), "{hint}");

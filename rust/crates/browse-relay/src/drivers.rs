@@ -430,7 +430,7 @@ impl Relay {
             bodies.push((None, json!({ "protocol": "webdriver-bidi", "url": url })));
         }
         for record in crate::firefox::read_recorded(&self.paths) {
-            let key = crate::firefox::driver_key(&record.profile);
+            let key = record.driver_key();
             let skip = {
                 let st = self.st();
                 st.connecting.contains(&key) || st.drivers.iter().any(|d| d.key == key && d.connected())
@@ -438,7 +438,14 @@ impl Relay {
             if skip {
                 continue;
             }
-            if let crate::firefox::ProfileState::Listening { url, .. } = crate::firefox::state(&record.profile) {
+            let url = if record.profile.as_os_str().is_empty() {
+                record.endpoint.clone().filter(|u| crate::firefox::live_endpoint(u))
+            } else if let crate::firefox::ProfileState::Listening { url, .. } = crate::firefox::state(&record.profile) {
+                Some(url)
+            } else {
+                None
+            };
+            if let Some(url) = url {
                 bodies.push((Some(key.clone()), json!({ "protocol": "webdriver-bidi", "url": url, "key": key, "name": record.display_name() })));
             }
         }

@@ -134,6 +134,9 @@ pub fn connect(options: &Options) -> anyhow::Result<i32> {
                 Target { app, profile: selected.dir, dedicated, headless }
             }
             Err(SelectError::PermissionDenied(detail)) => {
+                if options.profile.is_none() {
+                    return connect_without_profile_dir(&paths, app, &recorded, options.relaunch);
+                }
                 eprintln!("{}", unreadable(&app.name, &detail));
                 return Ok(1);
             }
@@ -169,7 +172,13 @@ fn connected(key: &str) -> Option<Value> {
 }
 
 fn unreadable(name: &str, detail: &str) -> String {
-    format!("! browse can't read {name}'s profile folder ({detail}). Run `browse firefox` in your own terminal so it can read Firefox's profile folder.")
+    if cfg!(target_os = "macos") {
+        format!(
+            "! browse can't read {name}'s profile folder ({detail}). On macOS, omit --profile to launch {name}'s default profile without folder access, grant your terminal Full Disk Access in System Settings → Privacy & Security → Full Disk Access, or use `browse firefox --dedicated`."
+        )
+    } else {
+        format!("! browse can't read {name}'s profile folder ({detail}). Use `browse firefox --dedicated` for a separate browse profile.")
+    }
 }
 
 fn tty() -> bool {
@@ -440,6 +449,7 @@ fn attach(target: &Target, url: &str, prefs_added: bool) -> anyhow::Result<i32> 
         app: target.app.kind.id().into(),
         exe: target.app.bundle.clone().unwrap_or_else(|| target.app.exe.clone()),
         profile: target.profile.clone(),
+        endpoint: None,
         dedicated: target.dedicated,
         headless: target.headless,
         name: Some(target.app.name.clone()),
@@ -450,6 +460,192 @@ fn attach(target: &Target, url: &str, prefs_added: bool) -> anyhow::Result<i32> 
     println!("✓ Connected {} ({}) to browse as `{}`. Ask your agent to open a page.", target.app.name, tilde(&target.profile), text(browser, "id"));
     println!("  While browse drives it, {} shows a robot icon in the address bar and pages see navigator.webdriver = true.", target.app.name);
     Ok(0)
+}
+
+/// Fallback when the OS (e.g. macOS App Data Protection) blocks reading Firefox's profile folder: let Firefox
+/// itself open its real default profile on a chosen loopback port, without touching ~/Library/Application Support.
+fn connect_without_profile_dir(
+    paths: &browse_relay::paths::Paths,
+    app: App,
+    recorded: &[RecordedFirefox],
+    relaunch: bool,
+) -> anyhow::Result<i32> {
+    let key = firefox::app_driver_key(app.kind);
+    let flag = if app.kind == AppKind::Firefox { String::new() } else { format!(" --app {}", app.kind.id()) };
+    if let Some(browser) = connected(&key) {
+        println!("✓ Already connected: {} ({}).", text(&browser, "name"), text(&browser, "id"));
+        return Ok(0);
+    }
+    if let Some(url) = recorded
+        .iter()
+        .find(|r| r.driver_key() == key)
+        .and_then(|r| r.endpoint.as_deref())
+        .filter(|u| firefox::live_endpoint(u))
+    {
+        return attach_default_profile(&app, &key, url);
+    }
+    if let Some(pid) = running_app_pid(&app) {
+        let choice = if relaunch {
+            Choice::Relaunch
+        } else if tty() {
+            ask(&app.name)?
+        } else {
+            println!("{} is open without remote control, so browse can't connect to it yet. Either:", app.name);
+            println!("  browse firefox --relaunch{flag}     restart {} for browse", app.name);
+            println!("  browse firefox --dedicated{flag}    use a separate browse profile instead (none of your sign-ins)");
+            println!("Agent: ask the user before running --relaunch (private windows won't restore).");
+            return Ok(2);
+        };
+        match choice {
+            Choice::Relaunch => {
+                if !quit_app(&app.name, pid, &flag) {
+                    return Ok(1);
+                }
+            }
+            Choice::Dedicated => {
+                let dedicated = Target { profile: firefox::dedicated_profile(paths, app.kind), dedicated: true, headless: false, app };
+                if let Some(browser) = connected(&firefox::driver_key(&dedicated.profile)) {
+                    println!("✓ Already connected: {} ({}).", text(&browser, "name"), text(&browser, "id"));
+                    return Ok(0);
+                }
+                return run(dedicated, false);
+            }
+            Choice::Cancel => {
+                println!("Cancelled; nothing changed.");
+                return Ok(1);
+            }
+        }
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .context("picking a local port for Firefox")?
+        .local_addr()?
+        .port();
+    let url = format!("ws://127.0.0.1:{port}/session");
+    println!("Starting {} (default profile)…", app.name);
+    launch_default_profile(&app, port)?;
+    let deadline = Instant::now() + WAIT;
+    while Instant::now() < deadline {
+        if firefox::live_endpoint(&url) {
+            return attach_default_profile(&app, &key, &url);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    eprintln!("! {} didn't start listening for browse within {} s. Close it and run `browse firefox` again.", app.name, WAIT.as_secs());
+    Ok(1)
+}
+
+fn launch_default_profile(app: &App, port: u16) -> anyhow::Result<()> {
+    let port_str = port.to_string();
+    let args: Vec<OsString> = vec!["--remote-debugging-port".into(), port_str.into()];
+    if cfg!(target_os = "macos")
+        && let Some(bundle) = &app.bundle
+    {
+        let status = Command::new("open")
+            .arg("-n")
+            .arg("-a")
+            .arg(bundle)
+            .arg("--args")
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() {
+            bail!("couldn't open {} ({status})", bundle.display());
+        }
+        return Ok(());
+    }
+    let mut command = Command::new(&app.exe);
+    command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    detach(&mut command);
+    command.spawn().with_context(|| format!("couldn't start {}", app.exe.display()))?;
+    Ok(())
+}
+
+fn attach_default_profile(app: &App, key: &str, url: &str) -> anyhow::Result<i32> {
+    let flag = if app.kind == AppKind::Firefox { String::new() } else { format!(" --app {}", app.kind.id()) };
+    let body = json!({ "protocol": "webdriver-bidi", "url": url, "key": key, "name": app.name });
+    let (status, answer) = relay::drivers("connect", &body)?;
+    if status == 409 && answer["code"] == "driver-session-busy" {
+        eprintln!(
+            "! {} already has a WebDriver BiDi session: another tool holds it, or an earlier one wasn't ended. Close that tool, or run `browse firefox --relaunch{flag}` to restart {}.",
+            app.name, app.name
+        );
+        return Ok(1);
+    }
+    if status != 200 {
+        eprintln!("! Couldn't connect {}: {}", app.name, answer["error"].as_str().unwrap_or("the relay refused"));
+        return Ok(1);
+    }
+    let record = RecordedFirefox {
+        app: app.kind.id().into(),
+        exe: app.bundle.clone().unwrap_or_else(|| app.exe.clone()),
+        profile: PathBuf::new(),
+        endpoint: Some(url.to_string()),
+        dedicated: false,
+        headless: false,
+        name: Some(app.name.clone()),
+        prefs_added: false,
+    };
+    firefox::record(&relay_api::paths(), record).context("couldn't record the connected Firefox")?;
+    let browser = &answer["browser"];
+    println!("✓ Connected {} (default profile) to browse as `{}`. Ask your agent to open a page.", app.name, text(browser, "id"));
+    println!("  While browse drives it, {} shows a robot icon in the address bar and pages see navigator.webdriver = true.", app.name);
+    Ok(0)
+}
+
+#[cfg(target_os = "macos")]
+fn running_app_pid(app: &App) -> Option<u32> {
+    let target = app.bundle.as_ref().unwrap_or(&app.exe).to_string_lossy().into_owned();
+    let script = format!(
+        r#"ObjC.import("AppKit");
+const target = {};
+const apps = $.NSWorkspace.sharedWorkspace.runningApplications;
+for (let i = 0; i < apps.count; i++) {{
+  const a = apps.objectAtIndex(i);
+  const b = a.bundleURL ? ObjC.unwrap(a.bundleURL.path) : "";
+  const e = a.executableURL ? ObjC.unwrap(a.executableURL.path) : "";
+  if (b === target || e === target) {{ console.log(a.processIdentifier); break; }}
+}}"#,
+        serde_json::to_string(&target).ok()?
+    );
+    let out = Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", &script])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    text.lines().find_map(|line| line.trim().parse::<u32>().ok()).filter(|pid| *pid > 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn running_app_pid(_app: &App) -> Option<u32> {
+    None
+}
+
+fn quit_app(name: &str, pid: u32, flag: &str) -> bool {
+    if cfg!(target_os = "macos") {
+        println!("Quitting {name} (it asks about anything unsaved)…");
+        let script = format!("ObjC.import(\"AppKit\"); $.NSRunningApplication.runningApplicationWithProcessIdentifier({pid}).terminate");
+        let _ = Command::new("osascript")
+            .args(["-l", "JavaScript", "-e", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    } else {
+        println!("Quit {name} now (its menu → Quit, or Ctrl+Q); browse waits up to {} s and opens it again.", WAIT.as_secs());
+    }
+    let deadline = Instant::now() + WAIT;
+    while browse_relay::process_alive(pid) {
+        if Instant::now() > deadline {
+            eprintln!("! {name} is still running. Quit it, then run `browse firefox --relaunch{flag}` again.");
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    true
 }
 
 fn connect_url(url: &str) -> anyhow::Result<i32> {
@@ -500,11 +696,11 @@ pub fn disconnect(args: &[String]) -> anyhow::Result<i32> {
         return Ok(1);
     };
     let key = text(&browser, "key");
-    let recorded = firefox::read_recorded(&paths).into_iter().find(|r| firefox::driver_key(&r.profile) == key);
+    let recorded = firefox::read_recorded(&paths).into_iter().find(|r| r.driver_key() == key);
     let quit = recorded.as_ref().is_some_and(|r| r.dedicated && r.headless);
     // Forgotten first, so the relay doesn't attach it again the moment it's let go.
-    if let Some(record) = &recorded {
-        firefox::forget(&paths, &record.profile)?;
+    if recorded.is_some() {
+        firefox::forget_key(&paths, &key)?;
     }
     let (status, answer) = relay::drivers("disconnect", &json!({ "browser": text(&browser, "id"), "quit": quit }))?;
     if status != 200 || answer["disconnected"] != true {
@@ -609,7 +805,7 @@ mod tests {
         assert_eq!(resolve_app(&discovery, None, &[]).unwrap().kind, AppKind::Nightly);
         assert_eq!(resolve_app(&discovery, Some("zen"), &[]).unwrap().kind, AppKind::Zen);
         assert!(resolve_app(&discovery, Some("firefox"), &[]).unwrap_err().contains("isn't installed"));
-        let record = RecordedFirefox { app: "zen".into(), exe: "/x".into(), profile: "/p".into(), dedicated: false, headless: false, name: None, prefs_added: false };
+        let record = RecordedFirefox { app: "zen".into(), exe: "/x".into(), profile: "/p".into(), endpoint: None, dedicated: false, headless: false, name: None, prefs_added: false };
         assert_eq!(resolve_app(&discovery, None, &[record]).unwrap().kind, AppKind::Zen);
         let by_path = resolve_app(&discovery, Some(dir.join("Zen.app").to_str().unwrap()), &[]).unwrap();
         assert_eq!(by_path.bundle, Some(dir.join("Zen.app")));
