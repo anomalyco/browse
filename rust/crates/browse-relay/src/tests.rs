@@ -1477,6 +1477,32 @@ async fn agent_tabs_survive_a_relay_restart() {
     drop(relay);
 }
 
+/// Wrong types fail before a tool runs, in OpenCode's shape; arguments a tool doesn't take are named only when the
+/// call fails anyway, and never fail a call that works.
+#[tokio::test]
+async fn wrong_argument_types_and_ignored_arguments_are_explained() {
+    let (h, _seen, _events) = connected("profile-validate", 190).await;
+    let port = h.handle.port();
+    let token = h.handle.token().to_string();
+    let call = |name: &str, arguments: Value| json!({ "name": name, "arguments": arguments });
+    let error = |output: &Value| output["content"][0]["text"].as_str().unwrap_or_default().to_string();
+
+    let (_, typed) = http(port, "POST", "/tools/call", Some(&token), Some(call("tabs", json!({ "action": "close", "idleMinutes": "ten", "foo": 1 })))).await;
+    assert_eq!(typed["isError"], true);
+    let text = error(&typed);
+    assert!(text.starts_with("Invalid arguments for tool \"tabs\":\n- idleMinutes: expected number, got \"ten\""), "{text}");
+    assert!(text.contains("Ignored: foo (not tabs arguments). tabs takes: "), "{text}");
+    assert!(text.contains("Arguments provided:") && text.ends_with("Update the arguments and call the tool again."), "{text}");
+
+    let (_, failed) = http(port, "POST", "/tools/call", Some(&token), Some(call("tabs", json!({ "action": "close", "text": "x" })))).await;
+    assert_eq!(failed["isError"], true);
+    assert!(error(&failed).contains("\nIgnored: text (not tabs arguments). tabs takes: "), "{}", error(&failed));
+
+    let (_, works) = http(port, "POST", "/tools/call", Some(&token), Some(call("tabs", json!({ "action": "list", "text": "x" })))).await;
+    assert_ne!(works["isError"], true, "an extra argument never fails a call: {works}");
+    assert!(!works.to_string().contains("Ignored"), "{works}");
+}
+
 #[tokio::test]
 async fn tool_arguments_are_checked() {
     let (h, _seen, _events) = connected("profile-args", 170).await;

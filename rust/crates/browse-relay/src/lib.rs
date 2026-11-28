@@ -31,6 +31,7 @@ mod presentation;
 mod relay;
 mod serve;
 mod tabs;
+mod validate;
 mod tools;
 mod util;
 mod watchdog;
