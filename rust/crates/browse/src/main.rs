@@ -1,3 +1,21 @@
+// `print!` and `println!` for this file and every module below. std's versions panic when stdout can't be written (a
+// full disk, a quota, /dev/full), and the release profile turns that panic into an abort and a core dump; these report
+// the error and exit 1, as main does for any other command error. A closed pipe still ends the CLI through SIGPIPE.
+macro_rules! print {
+    ($($arg:tt)*) => {
+        $crate::write_stdout(format_args!($($arg)*))
+    };
+}
+
+macro_rules! println {
+    () => {
+        $crate::write_stdout(format_args!("\n"))
+    };
+    ($($arg:tt)*) => {
+        $crate::write_stdout(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
 mod agents;
 mod browsers;
 mod cli;
@@ -175,7 +193,27 @@ fn main() {
         eprintln!("browse: {error:#}");
         1
     });
+    // A last line without a newline is still buffered; std's flush at exit would drop a failure to write it.
+    if let Err(error) = std::io::Write::flush(&mut std::io::stdout()) {
+        exit_unwritable(&error);
+    }
     std::process::exit(code);
+}
+
+fn write_stdout(args: std::fmt::Arguments) {
+    // Unit tests keep std's printing, which the test harness captures.
+    if cfg!(test) {
+        return std::print!("{args}");
+    }
+    if let Err(error) = std::io::Write::write_fmt(&mut std::io::stdout(), args) {
+        exit_unwritable(&error);
+    }
+}
+
+fn exit_unwritable(error: &std::io::Error) -> ! {
+    // Not eprintln!: if stderr is gone too, that would panic and abort after all.
+    let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("browse: can't write output: {error}\n"));
+    std::process::exit(1);
 }
 
 #[cfg(test)]
